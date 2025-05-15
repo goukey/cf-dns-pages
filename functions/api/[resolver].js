@@ -17,8 +17,6 @@ const ECS_PARAM = 'edns_client_subnet';
 const AUTO_ECS_PARAM = 'auto_ecs';
 // 单一服务器模式参数（禁用并行查询）
 const SINGLE_MODE_PARAM = 'single';
-// 重定向模式参数
-const REDIRECT_PARAM = 'redirect';
 // DNS查询结果格式参数
 const FORMAT_PARAM = 'format';
 // 显示所有类型记录参数
@@ -28,7 +26,7 @@ const ALL_TYPES_PARAM = 'all_types';
 const DEFAULT_UPSTREAM = "https://cloudflare-dns.com/dns-query";
 
 // 默认并行查询的服务器列表
-const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google", "aliyun", "dnspod", "adguard"];
+const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google"];
 
 // DNS查询超时时间（毫秒）
 const REQUEST_TIMEOUT = 5000;
@@ -916,180 +914,74 @@ export async function onRequest(context) {
       });
     }
     
-    // 检查是否需要重定向模式
-    const redirectMode = url.searchParams.get(REDIRECT_PARAM) === 'true';
     // 检查输出格式
     const outputFormat = url.searchParams.get(FORMAT_PARAM) || 'default';
     
-    if (redirectMode) {
+    if (outputFormat === 'simple') {
       try {
         // 获取响应体
         const dnsResponseBody = await result.response.arrayBuffer();
-        // 解析DNS响应
-        const resolvedIPs = extractIPsFromDNSResponse(dnsResponseBody, queryParams.get('type') || 'A');
         
-        if (resolvedIPs && resolvedIPs.length > 0) {
-          // 获取第一个IP地址
-          const firstIP = resolvedIPs[0];
+        // 始终显示所有类型记录
+        const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
+        
+        // 构建响应输出
+        const allTypesOutput = {
+          domain: domainName,
+          records: recordTypes,
+          server: result.server,
+          response_time_ms: result.time
+        };
+        
+        // 根据请求Accept头确定输出格式
+        const acceptHeader = request.headers.get('Accept') || '';
+        if (acceptHeader.includes('text/plain')) {
+          // 纯文本输出
+          let textOutput = `域名: ${domainName}\n`;
+          textOutput += `服务器: ${result.server}\n`;
+          textOutput += `响应时间: ${result.time}ms\n\n`;
           
-          // 构建协议（默认http）
-          const protocol = url.searchParams.get('protocol') || 'http';
+          // 添加各种记录
+          Object.keys(recordTypes).forEach(recordType => {
+            textOutput += `== ${recordType} 记录 ==\n`;
+            recordTypes[recordType].forEach((record, index) => {
+              textOutput += `${index + 1}. ${record.name} `;
+              
+              if (recordType === 'MX') {
+                textOutput += `[优先级: ${record.value.preference}] ${record.value.exchange}\n`;
+              } else {
+                textOutput += `${record.value}\n`;
+              }
+            });
+            textOutput += '\n';
+          });
           
-          // 构建端口（如果有）
-          const port = url.searchParams.get('port') ? `:${url.searchParams.get('port')}` : '';
+          if (Object.keys(recordTypes).length === 0) {
+            textOutput += "未找到任何记录\n";
+          }
           
-          // 构建路径（如果有）
-          const path = url.searchParams.get('path') || '';
-          
-          // 构建重定向URL
-          const redirectURL = `${protocol}://${firstIP}${port}${path}`;
-          
-          // 返回重定向响应
-          return new Response(null, {
-            status: 302,
+          return new Response(textOutput, {
+            status: 200,
             headers: {
-              'Location': redirectURL,
+              'Content-Type': 'text/plain; charset=utf-8',
               'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'public, max-age=60',
               'X-DNS-Upstream': result.server,
-              'X-DNS-Response-Time': `${result.time}ms`,
-              'X-DNS-Resolved-IP': firstIP,
-              'X-DNS-All-IPs': resolvedIPs.join(', ')
+              'X-DNS-Response-Time': `${result.time}ms`
             }
           });
-        }
-      } catch (error) {
-        console.error('处理重定向时出错:', error);
-        // 继续使用普通响应
-      }
-    } else if (outputFormat === 'simple') {
-      try {
-        // 获取响应体
-        const dnsResponseBody = await result.response.arrayBuffer();
-        
-        // 检查是否请求特定类型
-        const requestedType = queryParams.get('type');
-        // 默认显示所有类型，除非明确指定了type参数
-        const showAllTypes = !requestedType || url.searchParams.get(ALL_TYPES_PARAM) === 'true';
-        
-        if (showAllTypes) {
-          // 解析多种记录类型
-          const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
-          
-          // 构建响应输出
-          const allTypesOutput = {
-            domain: domainName,
-            records: recordTypes,
-            server: result.server,
-            response_time_ms: result.time
-          };
-          
-          // 根据请求Accept头确定输出格式
-          const acceptHeader = request.headers.get('Accept') || '';
-          if (acceptHeader.includes('text/plain')) {
-            // 纯文本输出
-            let textOutput = `域名: ${domainName}\n`;
-            textOutput += `服务器: ${result.server}\n`;
-            textOutput += `响应时间: ${result.time}ms\n\n`;
-            
-            // 添加各种记录
-            Object.keys(recordTypes).forEach(recordType => {
-              textOutput += `== ${recordType} 记录 ==\n`;
-              recordTypes[recordType].forEach((record, index) => {
-                textOutput += `${index + 1}. ${record.name} `;
-                
-                if (recordType === 'MX') {
-                  textOutput += `[优先级: ${record.value.preference}] ${record.value.exchange}\n`;
-                } else {
-                  textOutput += `${record.value}\n`;
-                }
-              });
-              textOutput += '\n';
-            });
-            
-            if (Object.keys(recordTypes).length === 0) {
-              textOutput += "未找到任何记录\n";
-            }
-            
-            return new Response(textOutput, {
-              status: 200,
-              headers: {
-                'Content-Type': 'text/plain; charset=utf-8',
-                'Access-Control-Allow-Origin': '*',
-                'Cache-Control': 'public, max-age=60',
-                'X-DNS-Upstream': result.server,
-                'X-DNS-Response-Time': `${result.time}ms`
-              }
-            });
-          } else {
-            // 返回JSON输出
-            return new Response(JSON.stringify(allTypesOutput, null, 2), {
-              status: 200,
-              headers: {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-                'Cache-Control': 'public, max-age=60',
-                'X-DNS-Upstream': result.server,
-                'X-DNS-Response-Time': `${result.time}ms`
-              }
-            });
-          }
         } else {
-          // 获取记录类型
-          const recordType = requestedType || 'A';
-          
-          // 解析DNS响应
-          const resolvedIPs = extractIPsFromDNSResponse(dnsResponseBody, recordType);
-          
-          // 构建简单输出 - 类似nslookup格式
-          const simpleOutput = {
-            domain: domainName,
-            type: recordType,
-            ips: resolvedIPs,
-            server: result.server,
-            response_time_ms: result.time
-          };
-          
-          // 根据请求Accept头确定输出格式
-          const acceptHeader = request.headers.get('Accept') || '';
-          if (acceptHeader.includes('text/plain')) {
-            // 纯文本输出，类似nslookup
-            let textOutput = `域名: ${domainName}\n`;
-            textOutput += `记录类型: ${recordType}\n`;
-            textOutput += `服务器: ${result.server}\n`;
-            textOutput += `响应时间: ${result.time}ms\n\n`;
-            textOutput += `查询结果:\n`;
-            
-            if (resolvedIPs.length === 0) {
-              textOutput += "未找到记录\n";
-            } else {
-              resolvedIPs.forEach((ip, index) => {
-                textOutput += `${index + 1}. ${ip}\n`;
-              });
+          // 返回JSON输出
+          return new Response(JSON.stringify(allTypesOutput, null, 2), {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'public, max-age=60',
+              'X-DNS-Upstream': result.server,
+              'X-DNS-Response-Time': `${result.time}ms`
             }
-            
-            return new Response(textOutput, {
-              status: 200,
-              headers: {
-                'Content-Type': 'text/plain; charset=utf-8',
-                'Access-Control-Allow-Origin': '*',
-                'Cache-Control': 'public, max-age=60',
-                'X-DNS-Upstream': result.server,
-                'X-DNS-Response-Time': `${result.time}ms`
-              }
-            });
-          } else {
-            // 返回JSON输出
-            return new Response(JSON.stringify(simpleOutput, null, 2), {
-              status: 200,
-              headers: {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-                'Cache-Control': 'public, max-age=60',
-                'X-DNS-Upstream': result.server,
-                'X-DNS-Response-Time': `${result.time}ms`
-              }
-            });
-          }
+          });
         }
       } catch (error) {
         console.error('处理简单输出时出错:', error);

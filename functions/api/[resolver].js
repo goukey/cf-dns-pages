@@ -323,10 +323,8 @@ export async function onRequest(context) {
     let requestOptions = {
       method: method,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; DNS-Resolver/2.0)',
-        'Accept': 'application/dns-json, application/json, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'DNT': '1',
+        'User-Agent': 'curl/8.0.0',  // 使用更简单更通用的User-Agent
+        'Accept': 'application/dns-json',
         'Connection': 'keep-alive'
       },
     };
@@ -412,6 +410,15 @@ export async function onRequest(context) {
           const timeoutPromise = new Promise((_, reject) => 
             setTimeout(() => reject(new Error('DNS查询超时')), 5000) // 5秒超时
           );
+          
+          // 如果是Cloudflare DNS服务，添加特定用户代理
+          if (servers[0].includes('cloudflare-dns.com')) {
+            requestOptions.headers['User-Agent'] = 'curl/8.0.0';
+            requestOptions.headers['Accept'] = 'application/dns-json';
+            // 移除可能导致Cloudflare拒绝的头
+            delete requestOptions.headers['Accept-Language'];
+            delete requestOptions.headers['DNT'];
+          }
           
           // 竞争超时和正常查询
           const response = await Promise.race([fetchPromise, timeoutPromise]);
@@ -509,6 +516,15 @@ export async function onRequest(context) {
           const timeoutPromise = new Promise((_, reject) => 
             setTimeout(() => reject(new Error('DNS查询超时')), 5000) // 5秒超时
           );
+          
+          // 如果是Cloudflare DNS服务，添加特定用户代理
+          if (server.includes('cloudflare-dns.com')) {
+            options.headers['User-Agent'] = 'curl/8.0.0';
+            options.headers['Accept'] = 'application/dns-json';
+            // 移除可能导致Cloudflare拒绝的头
+            delete options.headers['Accept-Language'];
+            delete options.headers['DNT'];
+          }
           
           // 竞争超时和正常查询
           const response = await Promise.race([fetchPromise, timeoutPromise]);

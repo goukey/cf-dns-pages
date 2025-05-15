@@ -966,8 +966,10 @@ export async function onRequest(context) {
         // 获取响应体
         const dnsResponseBody = await result.response.arrayBuffer();
         
-        // 检查是否请求所有类型
-        const showAllTypes = url.searchParams.get(ALL_TYPES_PARAM) === 'true';
+        // 检查是否请求特定类型
+        const requestedType = queryParams.get('type');
+        // 默认显示所有类型，除非明确指定了type参数
+        const showAllTypes = !requestedType || url.searchParams.get(ALL_TYPES_PARAM) === 'true';
         
         if (showAllTypes) {
           // 解析多种记录类型
@@ -1033,7 +1035,7 @@ export async function onRequest(context) {
           }
         } else {
           // 获取记录类型
-          const recordType = queryParams.get('type') || 'A';
+          const recordType = requestedType || 'A';
           
           // 解析DNS响应
           const resolvedIPs = extractIPsFromDNSResponse(dnsResponseBody, recordType);

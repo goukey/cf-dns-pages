@@ -29,7 +29,7 @@ const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google"];
 // 格式: "服务器名称": "完整的DoH服务器URL"
 const RESOLVER_SERVERS = {
   "cloudflare": "https://cloudflare-dns.com/dns-query",
-  "google": "https://dns.google/resolve",
+  "google": "https://dns.google/dns-query",
   // 可添加更多服务器，例如:
   // "example": "https://doh.example.com/dns-query"
 };
@@ -410,32 +410,13 @@ export async function onRequest(context) {
             delete requestOptions.headers['DNT'];
           }
           
-          // 如果是Google DNS的JSON API格式，需要特殊处理
-          let isGoogleJSON = false;
-          if (servers[0].includes('dns.google/resolve')) {
-            isGoogleJSON = true;
-            // 构建合适的URL格式
-            const googleParams = new URLSearchParams();
-            // 确保有name参数
-            const name = queryParams.get('name');
-            if (name) {
-              googleParams.set('name', name);
-            }
-            // 确保有type参数
-            const type = queryParams.get('type');
-            if (type) {
-              googleParams.set('type', type);
-            }
-            // 添加其他可能有用的参数
-            if (queryParams.get('do') === 'true') googleParams.set('do', '1');
-            if (queryParams.get('cd') === 'true') googleParams.set('cd', '1');
-            
-            // 使用新的参数替换URL中的搜索部分
-            serverUrl.search = googleParams.toString();
-            console.log(`特殊处理Google DNS JSON API: ${serverUrl.toString()}`);
-            
-            // 接受JSON格式
-            requestOptions.headers['Accept'] = 'application/json';
+          // 如果是Google DNS服务，添加特定用户代理
+          if (servers[0].includes('dns.google')) {
+            requestOptions.headers['User-Agent'] = 'curl/8.0.0';
+            requestOptions.headers['Accept'] = 'application/dns-message';
+            // 移除可能导致Google拒绝的头
+            delete requestOptions.headers['Accept-Language'];
+            delete requestOptions.headers['DNT'];
           }
           
           // 竞争超时和正常查询
@@ -445,32 +426,6 @@ export async function onRequest(context) {
           // 验证响应是否有效
           if (!response.ok) {
             throw new Error(`DNS服务器响应错误: ${response.status} ${response.statusText}`);
-          }
-          
-          // 如果是Google JSON格式，需要转换为标准格式处理
-          if (isGoogleJSON) {
-            const jsonData = await response.json();
-            console.log(`接收到Google JSON响应: ${JSON.stringify(jsonData).substring(0, 200)}...`);
-            
-            // 创建新的Response对象，包含Google JSON数据
-            const transformedResponse = new Response(JSON.stringify(jsonData), {
-              status: response.status,
-              statusText: response.statusText,
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Original-Content-Type': response.headers.get('Content-Type') || 'application/json'
-              }
-            });
-            
-            return { 
-              response: transformedResponse, 
-              server: servers[0], 
-              time: endTime - startTime,
-              hasEcs,
-              ecsSource,
-              serverSupportsEcs: serverSupportsEcsFlag,
-              isGoogleJSON: true  // 标记为Google JSON格式
-            };
           }
           
           return { 
@@ -570,32 +525,13 @@ export async function onRequest(context) {
             delete options.headers['DNT'];
           }
           
-          // 如果是Google DNS的JSON API格式，需要特殊处理
-          let isGoogleJSON = false;
-          if (server.includes('dns.google/resolve')) {
-            isGoogleJSON = true;
-            // 构建合适的URL格式
-            const googleParams = new URLSearchParams();
-            // 确保有name参数
-            const name = queryParams.get('name');
-            if (name) {
-              googleParams.set('name', name);
-            }
-            // 确保有type参数
-            const type = queryParams.get('type');
-            if (type) {
-              googleParams.set('type', type);
-            }
-            // 添加其他可能有用的参数
-            if (queryParams.get('do') === 'true') googleParams.set('do', '1');
-            if (queryParams.get('cd') === 'true') googleParams.set('cd', '1');
-            
-            // 使用新的参数替换URL中的搜索部分
-            serverUrl.search = googleParams.toString();
-            console.log(`特殊处理Google DNS JSON API: ${serverUrl.toString()}`);
-            
-            // 接受JSON格式
-            options.headers['Accept'] = 'application/json';
+          // 如果是Google DNS服务，添加特定用户代理
+          if (server.includes('dns.google')) {
+            options.headers['User-Agent'] = 'curl/8.0.0';
+            options.headers['Accept'] = 'application/dns-message';
+            // 移除可能导致Google拒绝的头
+            delete options.headers['Accept-Language'];
+            delete options.headers['DNT'];
           }
           
           // 竞争超时和正常查询
@@ -605,32 +541,6 @@ export async function onRequest(context) {
           // 验证响应是否有效
           if (!response.ok) {
             throw new Error(`DNS服务器响应错误: ${response.status} ${response.statusText}`);
-          }
-          
-          // 如果是Google JSON格式，需要转换为标准格式处理
-          if (isGoogleJSON) {
-            const jsonData = await response.json();
-            console.log(`接收到Google JSON响应: ${JSON.stringify(jsonData).substring(0, 200)}...`);
-            
-            // 创建新的Response对象，包含Google JSON数据
-            const transformedResponse = new Response(JSON.stringify(jsonData), {
-              status: response.status,
-              statusText: response.statusText,
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Original-Content-Type': response.headers.get('Content-Type') || 'application/json'
-              }
-            });
-            
-            return { 
-              response: transformedResponse, 
-              server: server, 
-              time: endTime - startTime,
-              hasEcs,
-              ecsSource,
-              serverSupportsEcs: serverSupportsEcsFlag,
-              isGoogleJSON: true  // 标记为Google JSON格式
-            };
           }
           
           return { 
@@ -728,33 +638,6 @@ export async function onRequest(context) {
       
       // 所有服务器都失败，抛出错误
       throw new Error(`所有上游服务器查询失败，最初错误：${result.message}`);
-    }
-
-    // 特殊处理Google JSON响应
-    if (result.isGoogleJSON) {
-      const contentType = 'application/json';
-      const responseHeaders = new Headers({
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST',
-        'Cache-Control': 'public, max-age=60',
-        'Content-Type': contentType,
-        'X-DNS-Upstream': result.server,
-        'X-DNS-Response-Time': `${result.time}ms`,
-        'X-DNS-Format': 'Google-JSON'
-      });
-      
-      if (result.hasEcs) {
-        const ecsParamValue = queryParams.get('edns_client_subnet');
-        responseHeaders.set('X-EDNS-Client-Subnet', ecsParamValue);
-        responseHeaders.set('X-EDNS-Client-Subnet-Used', result.serverSupportsEcs ? 'true' : 'false');
-        responseHeaders.set('X-EDNS-Client-Subnet-Source', result.ecsSource);
-      }
-      
-      return new Response(result.response.body, {
-        status: result.response.status,
-        statusText: result.response.statusText,
-        headers: responseHeaders
-      });
     }
 
     // 准备返回的Response对象

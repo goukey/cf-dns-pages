@@ -711,6 +711,9 @@ export async function onRequest(context) {
     
     // 检查是否需要重定向模式
     const redirectMode = url.searchParams.get(REDIRECT_PARAM) === 'true';
+    // 检查输出格式
+    const outputFormat = url.searchParams.get(FORMAT_PARAM) || 'default';
+    
     if (redirectMode) {
       try {
         // 获取响应体
@@ -749,6 +752,41 @@ export async function onRequest(context) {
         }
       } catch (error) {
         console.error('处理重定向时出错:', error);
+        // 继续使用普通响应
+      }
+    } else if (outputFormat === 'simple') {
+      try {
+        // 获取响应体
+        const dnsResponseBody = await result.response.arrayBuffer();
+        
+        // 获取记录类型
+        const recordType = queryParams.get('type') || 'A';
+        
+        // 解析DNS响应
+        const resolvedIPs = extractIPsFromDNSResponse(dnsResponseBody, recordType);
+        
+        // 构建简单输出
+        const simpleOutput = {
+          domain: domainName,
+          type: recordType,
+          ips: resolvedIPs,
+          server: result.server,
+          response_time_ms: result.time
+        };
+        
+        // 返回简单JSON输出
+        return new Response(JSON.stringify(simpleOutput, null, 2), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=60',
+            'X-DNS-Upstream': result.server,
+            'X-DNS-Response-Time': `${result.time}ms`
+          }
+        });
+      } catch (error) {
+        console.error('处理简单输出时出错:', error);
         // 继续使用普通响应
       }
     }

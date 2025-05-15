@@ -107,6 +107,45 @@
     .nav-link.active {
       font-weight: bold;
     }
+    .simple-dns-result {
+      background: #f8f9fa;
+      border-radius: 6px;
+      padding: 15px;
+      margin-top: 10px;
+    }
+    .simple-dns-result .domain {
+      font-weight: bold;
+      font-size: 18px;
+      color: #0d6efd;
+      margin-bottom: 10px;
+    }
+    .simple-dns-result .record-type {
+      display: inline-block;
+      background: #6c757d;
+      color: white;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      margin-left: 10px;
+    }
+    .simple-dns-result .ip-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .simple-dns-result .ip-list li {
+      padding: 5px 10px;
+      border-left: 3px solid #28a745;
+      margin-bottom: 5px;
+      background: #f0f8ff;
+    }
+    .simple-dns-result .dns-info {
+      font-size: 12px;
+      color: #6c757d;
+      margin-top: 10px;
+      border-top: 1px solid #dee2e6;
+      padding-top: 10px;
+    }
   </style>
 </head>
 <body>
@@ -295,6 +334,15 @@
               </div>
               
               <div class="mb-3">
+                <label for="output-format" class="form-label">输出格式</label>
+                <select class="form-select" id="output-format">
+                  <option value="default">默认格式 - 原始DNS响应</option>
+                  <option value="simple" selected>简洁格式 - 类似nslookup</option>
+                </select>
+                <div class="form-text">选择简洁格式可获得更易读的查询结果</div>
+              </div>
+              
+              <div class="mb-3 d-none">
                 <div class="form-check form-switch">
                   <input class="form-check-input" type="checkbox" role="switch" id="enable-redirect">
                   <label class="form-check-label" for="enable-redirect">启用重定向模式</label>
@@ -762,16 +810,6 @@
       });
     });
     
-    // 切换重定向设置显示
-    document.getElementById('enable-redirect').addEventListener('change', function() {
-      const redirectSettings = document.getElementById('redirect-settings');
-      if (this.checked) {
-        redirectSettings.classList.remove('hidden');
-      } else {
-        redirectSettings.classList.add('hidden');
-      }
-    });
-    
     // 查询表单提交
     document.getElementById('query-form').addEventListener('submit', async function(event) {
       event.preventDefault();
@@ -876,8 +914,14 @@
           // 明确禁用自动ECS
           queryUrl += `&auto_ecs=false`;
         }
+
+        // 添加输出格式参数
+        const outputFormat = document.getElementById('output-format').value;
+        if (outputFormat) {
+          queryUrl += `&format=${outputFormat}`;
+        }
         
-        // 添加重定向参数
+        // 添加重定向参数 (隐藏功能)
         if (document.getElementById('enable-redirect').checked) {
           queryUrl += `&redirect=true`;
           
@@ -956,6 +1000,57 @@
           const data = await response.json();
           resultsElement.textContent = JSON.stringify(data, null, 2);
           showToast('查询成功', 'success');
+          
+          // 如果是简洁格式，显示更友好的UI
+          if (data.domain && data.ips) {
+            // 清空结果区域
+            resultsElement.innerHTML = '';
+            
+            // 创建简洁显示
+            const simpleResult = document.createElement('div');
+            simpleResult.className = 'simple-dns-result';
+            
+            // 添加域名和记录类型
+            const domainEl = document.createElement('div');
+            domainEl.className = 'domain';
+            domainEl.innerHTML = data.domain;
+            
+            // 添加记录类型
+            const typeSpan = document.createElement('span');
+            typeSpan.className = 'record-type';
+            typeSpan.textContent = data.type || 'A';
+            domainEl.appendChild(typeSpan);
+            
+            simpleResult.appendChild(domainEl);
+            
+            // 添加IP列表
+            if (data.ips.length > 0) {
+              const ipListEl = document.createElement('ul');
+              ipListEl.className = 'ip-list';
+              
+              data.ips.forEach(ip => {
+                const ipItem = document.createElement('li');
+                ipItem.textContent = ip;
+                ipListEl.appendChild(ipItem);
+              });
+              
+              simpleResult.appendChild(ipListEl);
+            } else {
+              const noResults = document.createElement('div');
+              noResults.className = 'alert alert-warning';
+              noResults.textContent = '未找到IP地址 (域名可能不存在或没有该类型记录)';
+              simpleResult.appendChild(noResults);
+            }
+            
+            // 添加DNS服务器信息
+            const dnsInfo = document.createElement('div');
+            dnsInfo.className = 'dns-info';
+            dnsInfo.innerHTML = `DNS服务器: ${data.server || '未知'}<br>响应时间: ${data.response_time_ms || 0}ms`;
+            simpleResult.appendChild(dnsInfo);
+            
+            // 添加到结果区域
+            resultsElement.appendChild(simpleResult);
+          }
         } else {
           // 文本响应
           const text = await response.text();

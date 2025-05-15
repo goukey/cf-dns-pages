@@ -37,8 +37,6 @@ const REQUEST_TIMEOUT = 5000;
 const RESOLVER_SERVERS = {
   "cloudflare": "https://cloudflare-dns.com/dns-query",
   "google": "https://dns.google/dns-query",
-  // 可添加更多服务器，例如:
-  // "example": "https://doh.example.com/dns-query"
 };
 
 // 预设服务器是否支持ECS
@@ -46,8 +44,6 @@ const RESOLVER_SERVERS = {
 const ECS_SUPPORT = {
   "cloudflare": false, // Cloudflare默认不支持ECS
   "google": true,      // Google支持ECS
-  // 与上方服务器对应，例如:
-  // "example": true    // 如果支持ECS则为true，否则为false
 };
 
 // 获取上游服务器配置
@@ -244,7 +240,7 @@ async function queryDNSServer(server, queryParams, request) {
   try {
     const serverUrl = new URL(server);
     
-    // 默认所有服务器都使用application/dns-message格式
+    // 统一使用RFC 8484标准格式 - application/dns-message
     const requestOptions = {
       method: 'GET',
       headers: {
@@ -274,18 +270,18 @@ async function queryDNSServer(server, queryParams, request) {
       if (serverSupportsEcsFlag) {
         const ecs = queryParams.get(ECS_PARAM);
         if (ecs) {
-          // 在DNS消息中添加ECS - 这需要修改DNS消息格式
-          // 目前简单处理，未实现ECS的DNS消息编码
           hasEcs = true;
           ecsSource = 'user';
+          // 由于我们使用dns参数传递base64编码的DNS查询消息，
+          // ECS需要在DNS消息中编码，这里暂不实现
+          // 如果需要，请在buildDNSMessage函数中添加ECS支持
         } else if (queryParams.get(AUTO_ECS_PARAM) === 'true') {
           // 自动获取客户端IP
           const clientIP = getClientIP(request);
           if (clientIP) {
-            // 在DNS消息中添加ECS - 这需要修改DNS消息格式
-            // 目前简单处理，未实现ECS的DNS消息编码
             hasEcs = true;
             ecsSource = 'auto';
+            // 同上，实际ECS编码需要修改DNS消息
           }
         }
       }
@@ -765,7 +761,7 @@ export async function onRequest(context) {
         // 解析DNS响应
         const resolvedIPs = extractIPsFromDNSResponse(dnsResponseBody, recordType);
         
-        // 构建简单输出
+        // 构建简单输出 - 类似nslookup格式
         const simpleOutput = {
           domain: domainName,
           type: recordType,
@@ -774,17 +770,47 @@ export async function onRequest(context) {
           response_time_ms: result.time
         };
         
-        // 返回简单JSON输出
-        return new Response(JSON.stringify(simpleOutput, null, 2), {
-          status: 200,
-          headers: {
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=60',
-            'X-DNS-Upstream': result.server,
-            'X-DNS-Response-Time': `${result.time}ms`
+        // 根据请求Accept头确定输出格式
+        const acceptHeader = request.headers.get('Accept') || '';
+        if (acceptHeader.includes('text/plain')) {
+          // 纯文本输出，类似nslookup
+          let textOutput = `域名: ${domainName}\n`;
+          textOutput += `记录类型: ${recordType}\n`;
+          textOutput += `服务器: ${result.server}\n`;
+          textOutput += `响应时间: ${result.time}ms\n\n`;
+          textOutput += `查询结果:\n`;
+          
+          if (resolvedIPs.length === 0) {
+            textOutput += "未找到记录\n";
+          } else {
+            resolvedIPs.forEach((ip, index) => {
+              textOutput += `${index + 1}. ${ip}\n`;
+            });
           }
-        });
+          
+          return new Response(textOutput, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'public, max-age=60',
+              'X-DNS-Upstream': result.server,
+              'X-DNS-Response-Time': `${result.time}ms`
+            }
+          });
+        } else {
+          // 返回JSON输出
+          return new Response(JSON.stringify(simpleOutput, null, 2), {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'public, max-age=60',
+              'X-DNS-Upstream': result.server,
+              'X-DNS-Response-Time': `${result.time}ms`
+            }
+          });
+        }
       } catch (error) {
         console.error('处理简单输出时出错:', error);
         // 继续使用普通响应

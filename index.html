@@ -342,6 +342,14 @@
                 <div class="form-text">选择简洁格式可获得更易读的查询结果</div>
               </div>
               
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="enable-all-types">
+                  <label class="form-check-label" for="enable-all-types">显示所有类型记录</label>
+                </div>
+                <div class="form-text">选中此项将显示域名的所有类型记录（A、AAAA、CNAME、MX等），而不仅仅是单一类型</div>
+              </div>
+              
               <div class="mb-3 d-none">
                 <div class="form-check form-switch">
                   <input class="form-check-input" type="checkbox" role="switch" id="enable-redirect">
@@ -934,6 +942,11 @@
         const outputFormat = document.getElementById('output-format').value;
         if (outputFormat) {
           queryUrl += `&format=${outputFormat}`;
+        }
+        
+        // 添加显示所有类型记录参数
+        if (document.getElementById('enable-all-types').checked) {
+          queryUrl += `&all_types=true`;
         }
         
         // 添加重定向参数 (隐藏功能)

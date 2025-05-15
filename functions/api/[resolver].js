@@ -21,6 +21,8 @@ const SINGLE_MODE_PARAM = 'single';
 const REDIRECT_PARAM = 'redirect';
 // DNS查询结果格式参数
 const FORMAT_PARAM = 'format';
+// 显示所有类型记录参数
+const ALL_TYPES_PARAM = 'all_types';
 
 // 默认上游服务器
 const DEFAULT_UPSTREAM = "https://cloudflare-dns.com/dns-query";
@@ -434,6 +436,209 @@ function extractIPsFromDNSResponse(buffer, recordType = 'A') {
   }
 }
 
+// 从DNS响应中提取多种类型的记录
+function extractAllRecordsFromDNSResponse(buffer) {
+  try {
+    // 创建数据视图
+    const view = new DataView(buffer);
+    
+    // 解析DNS头部
+    const qdcount = view.getUint16(4); // 问题计数
+    const ancount = view.getUint16(6); // 回答计数
+    
+    if (ancount === 0) {
+      return {}; // 没有回答记录
+    }
+    
+    // 跳过查询部分
+    let offset = 12; // DNS头部长度为12字节
+    
+    // 跳过所有问题
+    for (let i = 0; i < qdcount; i++) {
+      // 跳过域名
+      while (true) {
+        const len = view.getUint8(offset);
+        if (len === 0) {
+          offset += 1;
+          break;
+        }
+        if ((len & 0xc0) === 0xc0) {
+          // 压缩标签
+          offset += 2;
+          break;
+        }
+        offset += len + 1;
+      }
+      
+      // 跳过类型和类
+      offset += 4;
+    }
+    
+    // 解析回答记录
+    const records = {
+      A: [],
+      AAAA: [],
+      CNAME: [],
+      MX: [],
+      TXT: [],
+      NS: [],
+      SOA: [],
+      SRV: [],
+      PTR: [],
+      CAA: []
+    };
+    
+    const readDomainName = (startOffset) => {
+      let result = '';
+      let currentOffset = startOffset;
+      let jumping = false;
+      let jumpCount = 0;
+      
+      // 防止无限循环
+      const maxJumps = 10;
+      
+      while (true) {
+        if (jumpCount > maxJumps) {
+          return { name: '[解析错误:过多的压缩跳转]', offset: currentOffset };
+        }
+        
+        const len = view.getUint8(currentOffset);
+        if (len === 0) {
+          // 域名结束
+          currentOffset += 1;
+          break;
+        }
+        
+        if ((len & 0xc0) === 0xc0) {
+          // 压缩标签，跳转到指定位置
+          if (!jumping) {
+            // 只在第一次跳转时移动当前偏移
+            jumping = true;
+          }
+          
+          // 计算跳转位置
+          const jumpOffset = ((len & 0x3f) << 8) | view.getUint8(currentOffset + 1);
+          currentOffset = jumpOffset;
+          jumpCount++;
+          continue;
+        }
+        
+        // 读取标签
+        currentOffset += 1;
+        let label = '';
+        for (let i = 0; i < len; i++) {
+          label += String.fromCharCode(view.getUint8(currentOffset + i));
+        }
+        result += (result ? '.' : '') + label;
+        currentOffset += len;
+      }
+      
+      return { 
+        name: result, 
+        offset: jumping ? startOffset + 2 : currentOffset // 如果发生了跳转，返回原始位置+2
+      };
+    };
+    
+    for (let i = 0; i < ancount; i++) {
+      // 读取域名
+      const domainResult = readDomainName(offset);
+      const domainName = domainResult.name;
+      offset = domainResult.offset;
+      
+      // 读取记录类型
+      const type = view.getUint16(offset);
+      offset += 2;
+      
+      // 读取类
+      const recordClass = view.getUint16(offset);
+      offset += 2;
+      
+      // 读取TTL
+      const ttl = view.getUint32(offset);
+      offset += 4;
+      
+      // 读取数据长度
+      const rdlength = view.getUint16(offset);
+      offset += 2;
+      
+      // 根据记录类型解析数据
+      switch (type) {
+        case 1: // A记录
+          if (rdlength === 4) {
+            const ip = `${view.getUint8(offset)}.${view.getUint8(offset+1)}.${view.getUint8(offset+2)}.${view.getUint8(offset+3)}`;
+            records.A.push({ name: domainName, value: ip, ttl });
+          }
+          break;
+          
+        case 28: // AAAA记录
+          if (rdlength === 16) {
+            let ip = '';
+            for (let j = 0; j < 8; j++) {
+              const hexPart = view.getUint16(offset + j * 2).toString(16);
+              ip += (j > 0 ? ':' : '') + hexPart;
+            }
+            records.AAAA.push({ name: domainName, value: ip, ttl });
+          }
+          break;
+          
+        case 5: // CNAME记录
+          {
+            const cnameResult = readDomainName(offset);
+            records.CNAME.push({ name: domainName, value: cnameResult.name, ttl });
+          }
+          break;
+          
+        case 15: // MX记录
+          {
+            const preference = view.getUint16(offset);
+            const exchangeResult = readDomainName(offset + 2);
+            records.MX.push({ 
+              name: domainName, 
+              value: { preference, exchange: exchangeResult.name }, 
+              ttl 
+            });
+          }
+          break;
+          
+        case 16: // TXT记录
+          {
+            let txtOffset = offset;
+            let txtValue = '';
+            const txtLength = view.getUint8(txtOffset);
+            txtOffset++;
+            for (let j = 0; j < txtLength; j++) {
+              txtValue += String.fromCharCode(view.getUint8(txtOffset + j));
+            }
+            records.TXT.push({ name: domainName, value: txtValue, ttl });
+          }
+          break;
+          
+        case 2: // NS记录
+          {
+            const nsResult = readDomainName(offset);
+            records.NS.push({ name: domainName, value: nsResult.name, ttl });
+          }
+          break;
+      }
+      
+      // 跳过数据部分
+      offset += rdlength;
+    }
+    
+    // 清理空数组
+    Object.keys(records).forEach(key => {
+      if (records[key].length === 0) {
+        delete records[key];
+      }
+    });
+    
+    return records;
+  } catch (error) {
+    console.error('解析DNS响应时出错:', error);
+    return {};
+  }
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
@@ -761,61 +966,128 @@ export async function onRequest(context) {
         // 获取响应体
         const dnsResponseBody = await result.response.arrayBuffer();
         
-        // 获取记录类型
-        const recordType = queryParams.get('type') || 'A';
+        // 检查是否请求所有类型
+        const showAllTypes = url.searchParams.get(ALL_TYPES_PARAM) === 'true';
         
-        // 解析DNS响应
-        const resolvedIPs = extractIPsFromDNSResponse(dnsResponseBody, recordType);
-        
-        // 构建简单输出 - 类似nslookup格式
-        const simpleOutput = {
-          domain: domainName,
-          type: recordType,
-          ips: resolvedIPs,
-          server: result.server,
-          response_time_ms: result.time
-        };
-        
-        // 根据请求Accept头确定输出格式
-        const acceptHeader = request.headers.get('Accept') || '';
-        if (acceptHeader.includes('text/plain')) {
-          // 纯文本输出，类似nslookup
-          let textOutput = `域名: ${domainName}\n`;
-          textOutput += `记录类型: ${recordType}\n`;
-          textOutput += `服务器: ${result.server}\n`;
-          textOutput += `响应时间: ${result.time}ms\n\n`;
-          textOutput += `查询结果:\n`;
+        if (showAllTypes) {
+          // 解析多种记录类型
+          const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
           
-          if (resolvedIPs.length === 0) {
-            textOutput += "未找到记录\n";
+          // 构建响应输出
+          const allTypesOutput = {
+            domain: domainName,
+            records: recordTypes,
+            server: result.server,
+            response_time_ms: result.time
+          };
+          
+          // 根据请求Accept头确定输出格式
+          const acceptHeader = request.headers.get('Accept') || '';
+          if (acceptHeader.includes('text/plain')) {
+            // 纯文本输出
+            let textOutput = `域名: ${domainName}\n`;
+            textOutput += `服务器: ${result.server}\n`;
+            textOutput += `响应时间: ${result.time}ms\n\n`;
+            
+            // 添加各种记录
+            Object.keys(recordTypes).forEach(recordType => {
+              textOutput += `== ${recordType} 记录 ==\n`;
+              recordTypes[recordType].forEach((record, index) => {
+                textOutput += `${index + 1}. ${record.name} `;
+                
+                if (recordType === 'MX') {
+                  textOutput += `[优先级: ${record.value.preference}] ${record.value.exchange}\n`;
+                } else {
+                  textOutput += `${record.value}\n`;
+                }
+              });
+              textOutput += '\n';
+            });
+            
+            if (Object.keys(recordTypes).length === 0) {
+              textOutput += "未找到任何记录\n";
+            }
+            
+            return new Response(textOutput, {
+              status: 200,
+              headers: {
+                'Content-Type': 'text/plain; charset=utf-8',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'public, max-age=60',
+                'X-DNS-Upstream': result.server,
+                'X-DNS-Response-Time': `${result.time}ms`
+              }
+            });
           } else {
-            resolvedIPs.forEach((ip, index) => {
-              textOutput += `${index + 1}. ${ip}\n`;
+            // 返回JSON输出
+            return new Response(JSON.stringify(allTypesOutput, null, 2), {
+              status: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'public, max-age=60',
+                'X-DNS-Upstream': result.server,
+                'X-DNS-Response-Time': `${result.time}ms`
+              }
             });
           }
-          
-          return new Response(textOutput, {
-            status: 200,
-            headers: {
-              'Content-Type': 'text/plain; charset=utf-8',
-              'Access-Control-Allow-Origin': '*',
-              'Cache-Control': 'public, max-age=60',
-              'X-DNS-Upstream': result.server,
-              'X-DNS-Response-Time': `${result.time}ms`
-            }
-          });
         } else {
-          // 返回JSON输出
-          return new Response(JSON.stringify(simpleOutput, null, 2), {
-            status: 200,
-            headers: {
-              'Content-Type': 'application/json',
-              'Access-Control-Allow-Origin': '*',
-              'Cache-Control': 'public, max-age=60',
-              'X-DNS-Upstream': result.server,
-              'X-DNS-Response-Time': `${result.time}ms`
+          // 获取记录类型
+          const recordType = queryParams.get('type') || 'A';
+          
+          // 解析DNS响应
+          const resolvedIPs = extractIPsFromDNSResponse(dnsResponseBody, recordType);
+          
+          // 构建简单输出 - 类似nslookup格式
+          const simpleOutput = {
+            domain: domainName,
+            type: recordType,
+            ips: resolvedIPs,
+            server: result.server,
+            response_time_ms: result.time
+          };
+          
+          // 根据请求Accept头确定输出格式
+          const acceptHeader = request.headers.get('Accept') || '';
+          if (acceptHeader.includes('text/plain')) {
+            // 纯文本输出，类似nslookup
+            let textOutput = `域名: ${domainName}\n`;
+            textOutput += `记录类型: ${recordType}\n`;
+            textOutput += `服务器: ${result.server}\n`;
+            textOutput += `响应时间: ${result.time}ms\n\n`;
+            textOutput += `查询结果:\n`;
+            
+            if (resolvedIPs.length === 0) {
+              textOutput += "未找到记录\n";
+            } else {
+              resolvedIPs.forEach((ip, index) => {
+                textOutput += `${index + 1}. ${ip}\n`;
+              });
             }
-          });
+            
+            return new Response(textOutput, {
+              status: 200,
+              headers: {
+                'Content-Type': 'text/plain; charset=utf-8',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'public, max-age=60',
+                'X-DNS-Upstream': result.server,
+                'X-DNS-Response-Time': `${result.time}ms`
+              }
+            });
+          } else {
+            // 返回JSON输出
+            return new Response(JSON.stringify(simpleOutput, null, 2), {
+              status: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'public, max-age=60',
+                'X-DNS-Upstream': result.server,
+                'X-DNS-Response-Time': `${result.time}ms`
+              }
+            });
+          }
         }
       } catch (error) {
         console.error('处理简单输出时出错:', error);

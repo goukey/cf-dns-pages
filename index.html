@@ -187,8 +187,8 @@
                 <p>基本查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A</code><br><small class="text-muted">默认并行查询Cloudflare和DNSPod，返回最快结果</small></p>
                 <p>IPv6地址查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=AAAA</code></p>
                 <p>单一服务器模式：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&single=true</code></p>
-                <p>指定节点：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&server=google</code></p>
-                <p>多节点并行查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&server=cloudflare,google,quad9</code></p>
+                <p>指定节点：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&server=dnspod</code></p>
+                <p>多节点并行查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&server=cloudflare,dnspod,aliyun</code></p>
                 <p>使用所有预设节点：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&parallel=true</code></p>
                 <p>启用自动ECS (默认已启用)：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&auto_ecs=true</code></p>
                 <p>手动指定ECS：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&edns_client_subnet=192.168.1.0/24</code></p>
@@ -232,7 +232,7 @@
               <div class="mb-3">
                 <label for="server-type" class="form-label">上游服务器</label>
                 <select class="form-select" id="server-type" onchange="toggleServerOptions()">
-                  <option value="default">默认并行服务器 (Cloudflare + Google)</option>
+                  <option value="default">默认并行服务器 (Cloudflare + DNSPod)</option>
                   <option value="single">单一服务器 (Cloudflare)</option>
                   <option value="predefined">选择预设服务器</option>
                   <option value="all">所有预设服务器</option>

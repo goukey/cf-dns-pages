@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DNS解析加速服务</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.6;
+      padding-top: 20px;
+      padding-bottom: 40px;
+    }
+    .header {
+      border-bottom: 1px solid #eee;
+      padding-bottom: 10px;
+      margin-bottom: 30px;
+    }
+    .footer {
+      border-top: 1px solid #eee;
+      padding-top: 20px;
+      margin-top: 50px;
+      color: #666;
+    }
+    code {
+      background: #f5f5f5;
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-family: monaco, monospace;
+    }
+    .status-badge {
+      padding: 5px 10px;
+      border-radius: 20px;
+      font-size: 14px;
+      background: #28a745;
+      color: white;
+      margin-left: 10px;
+    }
+    .card {
+      margin-bottom: 20px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    .nav-tabs {
+      margin-bottom: 20px;
+    }
+    pre {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 4px;
+    }
+    .hidden {
+      display: none;
+    }
+    .response-info {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 10px;
+      padding: 8px;
+      background: #f0f8ff;
+      border-radius: 4px;
+      border-left: 3px solid #007bff;
+    }
+    .server-tag {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: #e9ecef;
+      font-size: 12px;
+      margin-right: 5px;
+    }
+    .multiselect-dropdown {
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .checkbox-list {
+      padding: 10px;
+    }
+    .checkbox-item {
+      display: block;
+      margin-bottom: 8px;
+    }
+    .server-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #eee;
+      padding: 10px 0;
+    }
+    .server-item:last-child {
+      border-bottom: none;
+    }
+    .server-item .btn-group {
+      flex-shrink: 0;
+    }
+    .server-name {
+      font-weight: bold;
+    }
+    .server-url {
+      color: #666;
+      font-size: 12px;
+      word-break: break-all;
+    }
+    .server-actions {
+      flex-shrink: 0;
+    }
+    .nav-link.active {
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header d-flex align-items-center">
+      <h1>DNS解析加速服务 <span class="status-badge">运行中</span></h1>
+    </div>
+    
+    <div class="row">
+      <div class="col-md-8">
+        <div class="card mb-4">
+          <div class="card-header">
+            <ul class="nav nav-tabs card-header-tabs">
+              <li class="nav-item">
+                <a class="nav-link active" id="tab-intro" href="#intro" data-bs-toggle="tab">功能简介</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" id="tab-servers" href="#servers" data-bs-toggle="tab">管理上游服务器</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" id="tab-usage" href="#usage" data-bs-toggle="tab">使用方法</a>
+              </li>
+            </ul>
+          </div>
+          <div class="card-body">
+            <div class="tab-content">
+              <div class="tab-pane fade show active" id="intro">
+                <p>这是一个DNS解析加速服务，通过高速节点提供快速稳定的域名解析功能，有效提高您的网络访问速度和稳定性。</p>
+                <p>本服务基于Cloudflare Pages Functions构建，利用边缘计算技术确保全球低延迟访问。</p>
+                
+                <h5 class="mt-4">主要特点：</h5>
+                <ul>
+                  <li>智能解析 - 分发请求到全球多个高速节点</li>
+                  <li>多节点支持 - 可动态指定上游解析节点</li>
+                  <li>并行查询 - 同时查询多个上游服务器，返回最快的结果</li>
+                  <li>自动ECS - 智能识别客户端IP并自动设置适当的客户端子网</li>
+                  <li>自定义上游 - 支持用户自定义任意HTTPS的DNS解析服务器</li>
+                  <li>兼容标准 - 完全兼容标准的DNS解析协议</li>
+                  <li>低延迟 - 基于Cloudflare的全球边缘网络</li>
+                  <li>IPv6支持 - 完全支持IPv6地址和AAAA记录查询</li>
+                  <li>默认并行查询 - 自动查询多个上游服务器获取最快响应</li>
+                </ul>
+                
+                <div class="alert alert-info mt-3">
+                  <strong>提示：</strong> 点击上方的"管理上游服务器"标签，可以添加、编辑或删除您的自定义DNS服务器。
+                </div>
+              </div>
+              
+              <div class="tab-pane fade" id="servers">
+                <h5>管理上游DNS服务器</h5>
+                <p>您可以添加、编辑和删除自定义DNS服务器。这些设置将保存在浏览器中，方便您下次使用。</p>
+                
+                <div id="server-list" class="mb-4">
+                  <!-- 这里将通过JavaScript动态加载服务器列表 -->
+                  <div class="text-center p-3 text-muted">加载中...</div>
+                </div>
+                
+                <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addServerModal">
+                  <i class="bi bi-plus-circle"></i> 添加新服务器
+                </button>
+                
+                <div class="alert alert-warning mt-3">
+                  <strong>注意：</strong> 自定义服务器仅保存在您的浏览器中，不会同步到其他设备。
+                </div>
+              </div>
+              
+              <div class="tab-pane fade" id="usage">
+                <h5>API端点</h5>
+                <p><code>/api/resolver</code> - 安全快速的解析服务</p>
+                
+                <h5>支持的请求方式</h5>
+                <ul>
+                  <li>GET请求，使用URL参数</li>
+                  <li>POST请求，使用application/dns-message格式</li>
+                </ul>
+                
+                <h5>示例</h5>
+                <p>基本查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A</code><br><small class="text-muted">默认并行查询Cloudflare和Google，返回最快结果</small></p>
+                <p>IPv6地址查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=AAAA</code></p>
+                <p>单一服务器模式：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&single=true</code></p>
+                <p>指定节点：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&server=google</code></p>
+                <p>多节点并行查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&server=cloudflare,google,quad9</code></p>
+                <p>使用所有预设节点：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&parallel=true</code></p>
+                <p>启用自动ECS (默认已启用)：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&auto_ecs=true</code></p>
+                <p>手动指定ECS：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&edns_client_subnet=192.168.1.0/24</code></p>
+                <p>IPv6的ECS：<br><code>https://[你的域名]/api/resolver?name=example.com&type=AAAA&edns_client_subnet=2001:db8::/56</code></p>
+                <p>自定义上游服务器：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&upstream=https://your-doh-server.com/dns-query</code></p>
+                
+                <h5>在浏览器中配置</h5>
+                <p>在支持自定义DNS的浏览器中（如Firefox），可以在设置中配置我们的服务作为DoH提供商：</p>
+                <p><code>https://[你的域名]/api/resolver</code></p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-md-4">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="h5 mb-0">测试工具</h2>
+          </div>
+          <div class="card-body">
+            <form id="query-form">
+              <div class="mb-3">
+                <label for="domain" class="form-label">域名</label>
+                <input type="text" class="form-control" id="domain" placeholder="例如: example.com" value="example.com">
+              </div>
+              
+              <div class="mb-3">
+                <label for="record-type" class="form-label">记录类型</label>
+                <select class="form-select" id="record-type">
+                  <option value="A">A - IPv4地址</option>
+                  <option value="AAAA">AAAA - IPv6地址</option>
+                  <option value="CNAME">CNAME - 规范名称</option>
+                  <option value="MX">MX - 邮件交换</option>
+                  <option value="TXT">TXT - 文本记录</option>
+                  <option value="NS">NS - 名称服务器</option>
+                  <option value="SOA">SOA - 权威记录</option>
+                </select>
+              </div>
+              
+              <div class="mb-3">
+                <label for="server-type" class="form-label">上游服务器</label>
+                <select class="form-select" id="server-type" onchange="toggleServerOptions()">
+                  <option value="default">默认并行服务器 (Cloudflare + Google)</option>
+                  <option value="single">单一服务器 (Cloudflare)</option>
+                  <option value="predefined">选择预设服务器</option>
+                  <option value="all">所有预设服务器</option>
+                  <option value="custom">自定义服务器</option>
+                </select>
+              </div>
+              
+              <div id="predefined-server" class="mb-3 hidden">
+                <label for="dns-servers" class="form-label">选择预设服务器</label>
+                <div class="dropdown">
+                  <button class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" id="serverDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                    选择服务器 (可多选)
+                  </button>
+                  <div class="dropdown-menu w-100 multiselect-dropdown" aria-labelledby="serverDropdown">
+                    <div class="checkbox-list" id="predefined-server-list">
+                      <!-- 将由JavaScript动态填充 -->
+                    </div>
+                  </div>
+                </div>
+                <div id="selected-servers" class="mt-2"></div>
+              </div>
+              
+              <div id="custom-server" class="mb-3 hidden">
+                <label for="custom-upstream" class="form-label">自定义服务器URL</label>
+                <input type="text" class="form-control" id="custom-upstream" placeholder="例如: https://doh.example.com/dns-query,https://doh2.example.com/dns-query">
+                <small class="text-muted">多个服务器使用逗号分隔</small>
+              </div>
+              
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="enable-ecs">
+                  <label class="form-check-label" for="enable-ecs">启用ECS (EDNS Client Subnet)</label>
+                </div>
+              </div>
+              
+              <div id="ecs-settings" class="mb-3 hidden">
+                <div class="form-check mb-2">
+                  <input class="form-check-input" type="radio" name="ecs-mode" id="ecs-auto" value="auto" checked>
+                  <label class="form-check-label" for="ecs-auto">
+                    自动检测ECS
+                  </label>
+                  <div class="form-text">系统将自动从您的IP地址创建子网信息</div>
+                </div>
+                <div class="form-check mb-2">
+                  <input class="form-check-input" type="radio" name="ecs-mode" id="ecs-manual" value="manual">
+                  <label class="form-check-label" for="ecs-manual">
+                    手动指定ECS
+                  </label>
+                </div>
+                
+                <div id="manual-ecs-input" class="mt-2 hidden">
+                  <label for="ecs-value" class="form-label">客户端子网</label>
+                  <input type="text" class="form-control" id="ecs-value" placeholder="例如: 192.168.1.0/24 或 8.8.8.8">
+                  <small class="text-muted">格式: IP地址/掩码长度 (例如: 192.168.1.0/24)</small>
+                </div>
+                
+                <div class="mt-2" id="servers-ecs-support">
+                  <!-- 将由JavaScript动态填充 -->
+                </div>
+              </div>
+              
+              <button type="submit" class="btn btn-primary w-100">执行查询</button>
+            </form>
+            
+            <div id="result-container" class="mt-4">
+              <h5>查询结果</h5>
+              <div id="response-info" class="response-info d-none"></div>
+              <div id="status-message" class="alert alert-info d-none"></div>
+              <pre id="results" class="mt-2">等待查询...</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="footer text-center">
+      <p>© <span id="current-year"></span> DNS解析加速服务 | 基于 Cloudflare Pages | <a href="https://github.com/yourusername/dns-resolver" target="_blank">GitHub</a></p>
+    </div>
+  </div>
+  
+  <!-- 添加服务器模态框 -->
+  <div class="modal fade" id="addServerModal" tabindex="-1" aria-labelledby="addServerModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="addServerModalLabel">添加DNS服务器</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <form id="add-server-form">
+            <div class="mb-3">
+              <label for="server-name" class="form-label">服务器名称</label>
+              <input type="text" class="form-control" id="server-name" placeholder="例如: MyDNS" required>
+              <div class="form-text">为服务器取一个易记的名称，仅用于显示</div>
+            </div>
+            <div class="mb-3">
+              <label for="server-url" class="form-label">服务器URL</label>
+              <input type="url" class="form-control" id="server-url" placeholder="例如: https://doh.example.com/dns-query" required>
+              <div class="form-text">必须是完整的DoH服务器URL，包含https://前缀</div>
+            </div>
+            <div class="mb-3 form-check">
+              <input type="checkbox" class="form-check-input" id="server-ecs-support">
+              <label class="form-check-label" for="server-ecs-support">支持ECS (EDNS Client Subnet)</label>
+              <div class="form-text">如果服务器支持客户端子网功能，请勾选此项</div>
+            </div>
+            <input type="hidden" id="server-id" value="">
+            <input type="hidden" id="edit-mode" value="add">
+          </form>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+          <button type="button" class="btn btn-primary" id="save-server-btn">保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/bootstrap-icons.css">
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    // 设置当前年份
+    document.getElementById('current-year').textContent = new Date().getFullYear();
+    
+    // -----------------------------------------------------
+    // 预设服务器配置
+    // -----------------------------------------------------
+    const DEFAULT_SERVERS = {
+      "cloudflare": {
+        name: "Cloudflare",
+        url: "https://cloudflare-dns.com/dns-query",
+        supportsEcs: false
+      },
+      "google": {
+        name: "Google",
+        url: "https://dns.google/dns-query",
+        supportsEcs: true
+      },
+      "quad9": {
+        name: "Quad9",
+        url: "https://dns.quad9.net/dns-query",
+        supportsEcs: true
+      },
+      "aliyun": {
+        name: "阿里云",
+        url: "https://dns.alidns.com/dns-query",
+        supportsEcs: true
+      }
+    };
+
+    // -----------------------------------------------------
+    // 自定义服务器管理
+    // -----------------------------------------------------
+    let customServers = {};
+    const STORAGE_KEY = 'dns_resolver_custom_servers';
+    
+    // 加载自定义服务器
+    function loadCustomServers() {
+      try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          customServers = JSON.parse(stored);
+        }
+      } catch (e) {
+        console.error('无法加载自定义服务器:', e);
+        customServers = {};
+      }
+      
+      renderServerList();
+      updateServerDropdowns();
+    }
+    
+    // 保存自定义服务器
+    function saveCustomServers() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(customServers));
+      } catch (e) {
+        console.error('无法保存自定义服务器:', e);
+        showToast('保存失败，请检查浏览器存储设置', 'danger');
+      }
+      
+      renderServerList();
+      updateServerDropdowns();
+    }
+    
+    // 添加或更新服务器
+    function addOrUpdateServer(id, name, url, supportsEcs) {
+      // 生成唯一ID（如果是新增）
+      if (!id) {
+        id = 'custom_' + Date.now();
+      }
+      
+      // 保存服务器信息
+      customServers[id] = {
+        name,
+        url,
+        supportsEcs
+      };
+      
+      saveCustomServers();
+      return id;
+    }
+    
+    // 删除服务器
+    function deleteServer(id) {
+      if (customServers[id]) {
+        delete customServers[id];
+        saveCustomServers();
+        return true;
+      }
+      return false;
+    }
+    
+    // 渲染服务器列表
+    function renderServerList() {
+      const serverListContainer = document.getElementById('server-list');
+      
+      if (Object.keys(customServers).length === 0 && Object.keys(DEFAULT_SERVERS).length === 0) {
+        serverListContainer.innerHTML = '<div class="alert alert-info">没有可用的服务器</div>';
+        return;
+      }
+      
+      let html = '<div class="list-group">';
+      
+      // 添加默认服务器（只读）
+      html += '<h6 class="mt-3 mb-2">系统预设服务器</h6>';
+      Object.entries(DEFAULT_SERVERS).forEach(([id, server]) => {
+        html += `
+          <div class="server-item">
+            <div>
+              <div class="server-name">${server.name} 
+                <span class="badge ${server.supportsEcs ? 'bg-success' : 'bg-secondary'}">${server.supportsEcs ? '支持ECS' : '不支持ECS'}</span>
+              </div>
+              <div class="server-url">${server.url}</div>
+            </div>
+            <div class="server-actions">
+              <span class="badge bg-secondary">系统预设</span>
+            </div>
+          </div>
+        `;
+      });
+      
+      // 添加自定义服务器
+      if (Object.keys(customServers).length > 0) {
+        html += '<h6 class="mt-4 mb-2">自定义服务器</h6>';
+        Object.entries(customServers).forEach(([id, server]) => {
+          html += `
+            <div class="server-item">
+              <div>
+                <div class="server-name">${server.name} 
+                  <span class="badge ${server.supportsEcs ? 'bg-success' : 'bg-secondary'}">${server.supportsEcs ? '支持ECS' : '不支持ECS'}</span>
+                </div>
+                <div class="server-url">${server.url}</div>
+              </div>
+              <div class="server-actions">
+                <button class="btn btn-sm btn-outline-primary edit-server-btn" data-id="${id}">
+                  <i class="bi bi-pencil"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-danger delete-server-btn" data-id="${id}">
+                  <i class="bi bi-trash"></i>
+                </button>
+              </div>
+            </div>
+          `;
+        });
+      }
+      
+      html += '</div>';
+      serverListContainer.innerHTML = html;
+      
+      // 添加事件监听器
+      document.querySelectorAll('.edit-server-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+          const id = this.getAttribute('data-id');
+          editServer(id);
+        });
+      });
+      
+      document.querySelectorAll('.delete-server-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+          const id = this.getAttribute('data-id');
+          if (confirm('确定要删除此服务器吗？')) {
+            deleteServer(id);
+          }
+        });
+      });
+    }
+    
+    // 编辑服务器
+    function editServer(id) {
+      const server = customServers[id];
+      if (!server) return;
+      
+      // 填充表单
+      document.getElementById('server-id').value = id;
+      document.getElementById('server-name').value = server.name;
+      document.getElementById('server-url').value = server.url;
+      document.getElementById('server-ecs-support').checked = server.supportsEcs;
+      document.getElementById('edit-mode').value = 'edit';
+      
+      // 更新模态框标题
+      document.getElementById('addServerModalLabel').textContent = '编辑DNS服务器';
+      
+      // 显示模态框
+      const modal = new bootstrap.Modal(document.getElementById('addServerModal'));
+      modal.show();
+    }
+    
+    // 更新服务器下拉列表
+    function updateServerDropdowns() {
+      // 更新预设服务器多选框
+      const checkboxList = document.getElementById('predefined-server-list');
+      let checkboxHtml = '';
+      
+      // 添加系统预设服务器
+      Object.entries(DEFAULT_SERVERS).forEach(([id, server]) => {
+        checkboxHtml += `
+          <label class="checkbox-item">
+            <input type="checkbox" value="${id}" class="predefined-server-checkbox"> ${server.name}
+          </label>
+        `;
+      });
+      
+      // 添加自定义服务器
+      Object.entries(customServers).forEach(([id, server]) => {
+        checkboxHtml += `
+          <label class="checkbox-item">
+            <input type="checkbox" value="${id}" class="predefined-server-checkbox"> ${server.name} <small>(自定义)</small>
+          </label>
+        `;
+      });
+      
+      checkboxList.innerHTML = checkboxHtml;
+      
+      // 重新绑定事件
+      document.querySelectorAll('.predefined-server-checkbox').forEach(checkbox => {
+        checkbox.addEventListener('change', updateSelectedServers);
+      });
+      
+      // 更新ECS支持信息
+      const ecsInfoContainer = document.getElementById('servers-ecs-support');
+      let ecsHtml = '';
+      
+      // 添加系统预设服务器ECS支持信息
+      Object.entries(DEFAULT_SERVERS).forEach(([id, server]) => {
+        ecsHtml += `
+          <span class="badge ${server.supportsEcs ? 'bg-success' : 'bg-info'} me-1">${server.name}</span> 
+          <small class="text-muted me-3">${server.supportsEcs ? '支持ECS' : '不支持ECS'}</small>
+        `;
+      });
+      
+      // 添加自定义服务器ECS支持信息
+      Object.entries(customServers).forEach(([id, server]) => {
+        ecsHtml += `
+          <span class="badge ${server.supportsEcs ? 'bg-success' : 'bg-info'} me-1">${server.name}</span> 
+          <small class="text-muted me-3">${server.supportsEcs ? '支持ECS' : '不支持ECS'}</small>
+        `;
+      });
+      
+      ecsInfoContainer.innerHTML = ecsHtml;
+    }
+    
+    // 初始化服务器管理功能
+    function initServerManagement() {
+      // 加载服务器列表
+      loadCustomServers();
+      
+      // 保存服务器按钮点击事件
+      document.getElementById('save-server-btn').addEventListener('click', function() {
+        const id = document.getElementById('server-id').value;
+        const name = document.getElementById('server-name').value.trim();
+        const url = document.getElementById('server-url').value.trim();
+        const supportsEcs = document.getElementById('server-ecs-support').checked;
+        const editMode = document.getElementById('edit-mode').value;
+        
+        // 验证输入
+        if (!name) {
+          alert('请输入服务器名称');
+          return;
+        }
+        
+        if (!url || !url.startsWith('https://')) {
+          alert('请输入有效的HTTPS服务器URL');
+          return;
+        }
+        
+        // 保存服务器
+        const serverId = addOrUpdateServer(editMode === 'edit' ? id : null, name, url, supportsEcs);
+        
+        // 关闭模态框
+        bootstrap.Modal.getInstance(document.getElementById('addServerModal')).hide();
+        
+        // 显示成功消息
+        showToast(`服务器 ${name} 已${editMode === 'edit' ? '更新' : '添加'}`, 'success');
+        
+        // 重置表单
+        resetServerForm();
+      });
+      
+      // 模态框显示前事件
+      document.getElementById('addServerModal').addEventListener('show.bs.modal', function() {
+        const editMode = document.getElementById('edit-mode').value;
+        if (editMode !== 'edit') {
+          resetServerForm();
+        }
+      });
+    }
+    
+    // 重置服务器表单
+    function resetServerForm() {
+      document.getElementById('server-id').value = '';
+      document.getElementById('server-name').value = '';
+      document.getElementById('server-url').value = '';
+      document.getElementById('server-ecs-support').checked = false;
+      document.getElementById('edit-mode').value = 'add';
+      document.getElementById('addServerModalLabel').textContent = '添加DNS服务器';
+    }
+    
+    // 显示消息提示
+    function showToast(message, type = 'info') {
+      const statusMessage = document.getElementById('status-message');
+      statusMessage.textContent = message;
+      statusMessage.className = `alert alert-${type}`;
+      statusMessage.classList.remove('d-none');
+      
+      // 3秒后自动隐藏
+      setTimeout(() => {
+        statusMessage.classList.add('d-none');
+      }, 3000);
+    }
+    
+    // -----------------------------------------------------
+    // 查询功能
+    // -----------------------------------------------------
+    // 切换服务器选项显示
+    function toggleServerOptions() {
+      const serverType = document.getElementById('server-type').value;
+      const predefinedServer = document.getElementById('predefined-server');
+      const customServer = document.getElementById('custom-server');
+      
+      // 隐藏所有选项
+      predefinedServer.classList.add('hidden');
+      customServer.classList.add('hidden');
+      
+      // 显示选中的选项
+      if (serverType === 'predefined') {
+        predefinedServer.classList.remove('hidden');
+      } else if (serverType === 'custom') {
+        customServer.classList.remove('hidden');
+      }
+    }
+    
+    // 初始化时调用一次
+    toggleServerOptions();
+    
+    // 处理预设服务器多选
+    const checkboxes = document.querySelectorAll('.predefined-server-checkbox');
+    checkboxes.forEach(checkbox => {
+      checkbox.addEventListener('change', updateSelectedServers);
+    });
+    
+    // 更新已选服务器显示
+    function updateSelectedServers() {
+      const selectedContainer = document.getElementById('selected-servers');
+      selectedContainer.innerHTML = '';
+      
+      const selected = [];
+      document.querySelectorAll('.predefined-server-checkbox:checked').forEach(checkbox => {
+        selected.push(checkbox.value);
+        const tag = document.createElement('span');
+        tag.className = 'server-tag';
+        
+        // 获取服务器名称
+        let serverName = checkbox.parentElement.textContent.trim();
+        if (serverName.includes('(自定义)')) {
+          // 移除自定义标记
+          serverName = serverName.replace('(自定义)', '').trim();
+        }
+        
+        tag.textContent = serverName;
+        selectedContainer.appendChild(tag);
+      });
+      
+      if (selected.length === 0) {
+        selectedContainer.innerHTML = '<small class="text-muted">未选择任何服务器</small>';
+      }
+    }
+    
+    // 切换ECS设置显示
+    document.getElementById('enable-ecs').addEventListener('change', function() {
+      const ecsSettings = document.getElementById('ecs-settings');
+      if (this.checked) {
+        ecsSettings.classList.remove('hidden');
+      } else {
+        ecsSettings.classList.add('hidden');
+      }
+    });
+    
+    // 切换手动ECS输入框显示
+    document.querySelectorAll('input[name="ecs-mode"]').forEach(radio => {
+      radio.addEventListener('change', function() {
+        const manualInput = document.getElementById('manual-ecs-input');
+        if (this.value === 'manual') {
+          manualInput.classList.remove('hidden');
+        } else {
+          manualInput.classList.add('hidden');
+        }
+      });
+    });
+    
+    // 查询表单提交
+    document.getElementById('query-form').addEventListener('submit', async function(event) {
+      event.preventDefault();
+      
+      const domain = document.getElementById('domain').value.trim();
+      const recordType = document.getElementById('record-type').value;
+      const serverType = document.getElementById('server-type').value;
+      const resultsElement = document.getElementById('results');
+      const statusMessage = document.getElementById('status-message');
+      const responseInfo = document.getElementById('response-info');
+      
+      if (!domain) {
+        showToast('请输入有效的域名', 'danger');
+        return;
+      }
+      
+      // 清空之前的状态
+      statusMessage.classList.add('d-none');
+      responseInfo.classList.add('d-none');
+      
+      // 显示加载状态
+      resultsElement.textContent = '正在查询...';
+      
+      try {
+        // 构建查询URL
+        let queryUrl = `/api/resolver?name=${encodeURIComponent(domain)}&type=${recordType}`;
+        
+        // 根据服务器选择类型添加参数
+        if (serverType === 'default') {
+          // 使用默认并行服务器，不需要额外参数
+        } else if (serverType === 'single') {
+          // 使用单一服务器模式
+          queryUrl += '&single=true';
+        } else if (serverType === 'predefined') {
+          // 获取选中的预设和自定义服务器
+          const selectedCheckboxes = document.querySelectorAll('.predefined-server-checkbox:checked');
+          
+          if (selectedCheckboxes.length > 0) {
+            const selectedServers = [];
+            selectedCheckboxes.forEach(checkbox => {
+              const serverId = checkbox.value;
+              
+              // 检查是否是自定义服务器
+              if (serverId.startsWith('custom_') && customServers[serverId]) {
+                // 使用自定义服务器URL
+                const serverUrl = customServers[serverId].url;
+                if (!queryUrl.includes('upstream=')) {
+                  queryUrl += `&upstream=${encodeURIComponent(serverUrl)}`;
+                } else {
+                  // 添加到已有的upstream参数中
+                  const currentUpstream = queryUrl.split('upstream=')[1].split('&')[0];
+                  queryUrl = queryUrl.replace(
+                    `upstream=${currentUpstream}`,
+                    `upstream=${currentUpstream},${encodeURIComponent(serverUrl)}`
+                  );
+                }
+              } else {
+                // 使用预设服务器ID
+                selectedServers.push(serverId);
+              }
+            });
+            
+            // 添加预设服务器
+            if (selectedServers.length > 0) {
+              queryUrl += `&server=${selectedServers.join(',')}`;
+            }
+          } else {
+            showToast('请至少选择一个预设服务器', 'danger');
+            return;
+          }
+        } else if (serverType === 'all') {
+          // 使用所有预设服务器
+          queryUrl += '&parallel=true';
+        } else if (serverType === 'custom') {
+          // 自定义上游服务器
+          const customUpstream = document.getElementById('custom-upstream').value.trim();
+          if (customUpstream) {
+            queryUrl += `&upstream=${encodeURIComponent(customUpstream)}`;
+          } else {
+            showToast('请输入自定义上游服务器URL', 'danger');
+            return;
+          }
+        }
+        
+        // 添加ECS参数
+        if (document.getElementById('enable-ecs').checked) {
+          const ecsMode = document.querySelector('input[name="ecs-mode"]:checked').value;
+          
+          if (ecsMode === 'manual') {
+            const ecsValue = document.getElementById('ecs-value').value.trim();
+            if (ecsValue) {
+              queryUrl += `&edns_client_subnet=${encodeURIComponent(ecsValue)}`;
+            } else {
+              showToast('已启用手动ECS但未提供子网值', 'warning');
+            }
+          } else {
+            // 自动ECS模式，不需要添加额外参数，服务器会自动处理
+            // 确保没有禁用自动ECS
+            queryUrl += `&auto_ecs=true`;
+          }
+        } else {
+          // 明确禁用自动ECS
+          queryUrl += `&auto_ecs=false`;
+        }
+        
+        // 执行查询
+        const startTime = Date.now();
+        const response = await fetch(queryUrl);
+        const totalTime = Date.now() - startTime;
+        
+        if (!response.ok) {
+          throw new Error(`HTTP错误: ${response.status}`);
+        }
+        
+        // 获取响应头信息
+        const upstreamServer = response.headers.get('X-DNS-Upstream') || '未知';
+        const serverResponseTime = response.headers.get('X-DNS-Response-Time') || '未知';
+        
+        // 创建响应信息HTML
+        let responseInfoHtml = `
+          <div><strong>上游服务器:</strong> ${upstreamServer}</div>
+          <div><strong>服务器响应时间:</strong> ${serverResponseTime}</div>
+          <div><strong>总查询时间:</strong> ${totalTime}ms</div>
+        `;
+        
+        // 添加ECS信息
+        const ecsInfo = response.headers.get('X-EDNS-Client-Subnet');
+        const ecsUsed = response.headers.get('X-EDNS-Client-Subnet-Used');
+        const ecsSource = response.headers.get('X-EDNS-Client-Subnet-Source');
+        if (ecsInfo) {
+          responseInfoHtml += `
+            <div><strong>客户端子网:</strong> ${ecsInfo}</div>
+            <div><strong>ECS是否生效:</strong> ${ecsUsed === 'true' ? '是' : '否'}</div>
+            <div><strong>ECS来源:</strong> ${ecsSource === 'auto' ? '自动检测' : '手动指定'}</div>
+          `;
+        }
+        
+        responseInfo.innerHTML = responseInfoHtml;
+        responseInfo.classList.remove('d-none');
+        
+        // 检查内容类型
+        const contentType = response.headers.get('content-type');
+        
+        if (contentType && contentType.includes('application/dns-message')) {
+          // 二进制DNS响应
+          const buffer = await response.arrayBuffer();
+          try {
+            const results = parseDnsPacket(buffer);
+            resultsElement.textContent = JSON.stringify(results, null, 2);
+            showToast('查询成功', 'success');
+          } catch (e) {
+            resultsElement.textContent = '收到二进制DNS响应，但无法解析详细内容';
+            showToast('收到响应但无法解析', 'warning');
+          }
+        } else if (contentType && contentType.includes('application/json')) {
+          // JSON响应
+          const data = await response.json();
+          resultsElement.textContent = JSON.stringify(data, null, 2);
+          showToast('查询成功', 'success');
+        } else {
+          // 文本响应
+          const text = await response.text();
+          resultsElement.textContent = text;
+          showToast('查询成功', 'success');
+        }
+      } catch (error) {
+        resultsElement.textContent = `查询出错: ${error.message}`;
+        showToast(`错误: ${error.message}`, 'danger');
+      }
+    });
+    
+    // 简单解析DNS包
+    function parseDnsPacket(buffer) {
+      // 这是一个简化版的DNS包解析器
+      const view = new DataView(buffer);
+      const id = view.getUint16(0);
+      const flags = view.getUint16(2);
+      const qdcount = view.getUint16(4);
+      const ancount = view.getUint16(6);
+      const nscount = view.getUint16(8);
+      const arcount = view.getUint16(10);
+      
+      // 根据DNS协议解析更多字段...
+      // 这里只提取基本信息
+      
+      return {
+        header: {
+          id,
+          flags,
+          isResponse: (flags & 0x8000) === 0x8000,
+          opcode: (flags & 0x7800) >> 11,
+          aa: (flags & 0x0400) === 0x0400,
+          tc: (flags & 0x0200) === 0x0200,
+          rd: (flags & 0x0100) === 0x0100,
+          ra: (flags & 0x0080) === 0x0080,
+          z: (flags & 0x0070) >> 4,
+          rcode: flags & 0x000F,
+        },
+        counts: {
+          questions: qdcount,
+          answers: ancount,
+          authority: nscount,
+          additional: arcount
+        },
+        // 完整解析需要更多代码来处理不同记录类型
+        summary: `响应包含 ${ancount} 条回答`,
+        rawSize: buffer.byteLength,
+        // 只显示前100字节的十六进制，避免界面过长
+        rawDataPreview: Array.from(new Uint8Array(buffer.slice(0, 100)))
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join(' ') + (buffer.byteLength > 100 ? '...' : '')
+      };
+    }
+    
+    // 初始化服务器管理功能
+    document.addEventListener('DOMContentLoaded', function() {
+      initServerManagement();
+    });
+  </script>
+</body>
+</html> 

@@ -4,9 +4,10 @@ export function onRequest(context) {
     status: 204,
     headers: {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST',
-      'Access-Control-Allow-Headers': 'Content-Type, Accept',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Accept, X-Requested-With',
       'Access-Control-Max-Age': '86400',
+      'Cache-Control': 'no-cache',
     },
   });
 } 

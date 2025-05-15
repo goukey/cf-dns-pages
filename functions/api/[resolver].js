@@ -125,9 +125,34 @@ export async function onRequest(context) {
   const url = new URL(request.url);
   const method = request.method;
 
+  // 添加调试信息
+  const debugInfo = {
+    url: request.url,
+    method: method,
+    params: Object.fromEntries(url.searchParams.entries()),
+    headers: Object.fromEntries(request.headers.entries())
+  };
+
   // 检查请求方法
   if (method !== 'GET' && method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
+  }
+
+  // 检查必要参数
+  const domainName = url.searchParams.get('name');
+  const recordType = url.searchParams.get('type');
+  
+  if (!domainName) {
+    return new Response(JSON.stringify({
+      error: 'Missing required parameter: name',
+      debug: debugInfo
+    }), { 
+      status: 400,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
   }
 
   try {
@@ -462,10 +487,15 @@ export async function onRequest(context) {
     });
   } catch (error) {
     console.error('处理DNS解析请求时出错:', error);
-    return new Response(`服务器内部错误: ${error.message}`, { 
+    return new Response(JSON.stringify({
+      error: '服务器内部错误',
+      message: error.message,
+      stack: error.stack,
+      debug: debugInfo
+    }), { 
       status: 500,
       headers: {
-        'Content-Type': 'text/plain;charset=UTF-8',
+        'Content-Type': 'application/json;charset=UTF-8',
         'Access-Control-Allow-Origin': '*'
       }
     });

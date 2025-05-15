@@ -131,12 +131,17 @@ export async function onRequest(context) {
   const url = new URL(request.url);
   const method = request.method;
 
+  // 添加请求ID便于追踪
+  const requestId = Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
+  console.log(`[${requestId}] 新请求: ${url.toString()}`);
+
   // 添加调试信息
   const debugInfo = {
     url: request.url,
     method: method,
     params: Object.fromEntries(url.searchParams.entries()),
-    headers: Object.fromEntries(request.headers.entries())
+    headers: Object.fromEntries(request.headers.entries()),
+    requestId: requestId
   };
 
   // 检查请求方法
@@ -235,11 +240,16 @@ export async function onRequest(context) {
 
     // 准备查询参数
     const queryParams = new URLSearchParams();
-    for (const param of ALLOWED_PARAMS) {
-      const value = url.searchParams.get(param);
-      if (value !== null) {
-        queryParams.set(param, value);
+    try {
+      for (const param of ALLOWED_PARAMS) {
+        const value = url.searchParams.get(param);
+        if (value !== null) {
+          queryParams.set(param, value);
+        }
       }
+    } catch (error) {
+      console.error('处理查询参数出错:', error);
+      // 继续处理，使用空的查询参数集
     }
     
     // 处理ECS参数
@@ -344,22 +354,39 @@ export async function onRequest(context) {
         let serverUrl;
         try {
           // 更智能地处理不同DNS服务器的URL格式
-          if (servers[0].includes('/dns-query') || servers[0].includes('?dns=')) {
-            // 已经包含完整路径的情况
-            serverUrl = new URL(servers[0]);
-          } else if (servers[0].includes('?')) {
-            // 已经有查询参数但没有dns-query路径
-            serverUrl = new URL(servers[0] + '&dns=' + encodeURIComponent(JSON.stringify(queryParams)));
-          } else {
-            // 标准情况：添加dns-query路径
-            serverUrl = new URL(servers[0].endsWith('/') ? 
+          try {
+            if (servers[0].includes('/dns-query') || servers[0].includes('?dns=')) {
+              // 已经包含完整路径的情况
+              serverUrl = new URL(servers[0]);
+            } else if (servers[0].includes('?')) {
+              // 已经有查询参数但没有dns-query路径
+              try {
+                const encodedParams = encodeURIComponent(JSON.stringify(Object.fromEntries(queryParams.entries())));
+                serverUrl = new URL(servers[0] + '&dns=' + encodedParams);
+              } catch (encodeError) {
+                console.error('参数编码错误:', encodeError);
+                // 回退到简单的URL添加
+                serverUrl = new URL(servers[0]);
+              }
+            } else {
+              // 标准情况：添加dns-query路径
+              serverUrl = new URL(servers[0].endsWith('/') ? 
                               servers[0] + 'dns-query' : 
                               servers[0] + '/dns-query');
-          }
-          
-          // 仅当URL不包含'?dns='才添加查询参数
-          if (!servers[0].includes('?dns=')) {
-            serverUrl.search = queryParams.toString();
+            }
+            
+            // 仅当URL不包含'?dns='才添加查询参数
+            if (!servers[0].includes('?dns=')) {
+              serverUrl.search = queryParams.toString();
+            }
+          } catch (urlError) {
+            console.error(`构建URL出错, server="${servers[0]}":`, urlError);
+            // 尝试一种简单的回退方式
+            try {
+              serverUrl = new URL('https://' + servers[0].replace(/^(https?:\/\/)/, '') + '/dns-query');
+            } catch (fallbackError) {
+              throw new Error(`无法构建有效的DNS服务器URL: ${servers[0]}`);
+            }
           }
 
           // 对于不支持ECS的服务器，移除ECS参数
@@ -415,13 +442,19 @@ export async function onRequest(context) {
           // 确保URL包含dns-query路径
           let serverUrl;
           try {
-            // 更智能地处理不同DNS服务器的URL格式
             if (server.includes('/dns-query') || server.includes('?dns=')) {
               // 已经包含完整路径的情况
               serverUrl = new URL(server);
             } else if (server.includes('?')) {
               // 已经有查询参数但没有dns-query路径
-              serverUrl = new URL(server + '&dns=' + encodeURIComponent(JSON.stringify(queryParams)));
+              try {
+                const encodedParams = encodeURIComponent(JSON.stringify(Object.fromEntries(queryParams.entries())));
+                serverUrl = new URL(server + '&dns=' + encodedParams);
+              } catch (encodeError) {
+                console.error('参数编码错误:', encodeError);
+                // 回退到简单的URL添加
+                serverUrl = new URL(server);
+              }
             } else {
               // 标准情况：添加dns-query路径
               serverUrl = new URL(server.endsWith('/') ? 
@@ -433,9 +466,14 @@ export async function onRequest(context) {
             if (!server.includes('?dns=')) {
               serverUrl.search = queryParams.toString();
             }
-          } catch (error) {
-            console.error(`处理服务器URL出错: ${server}`, error);
-            throw error;
+          } catch (urlError) {
+            console.error(`构建URL出错, server="${server}":`, urlError);
+            // 尝试一种简单的回退方式
+            try {
+              serverUrl = new URL('https://' + server.replace(/^(https?:\/\/)/, '') + '/dns-query');
+            } catch (fallbackError) {
+              throw new Error(`无法构建有效的DNS服务器URL: ${server}`);
+            }
           }
           
           // 处理ECS参数，对于不支持ECS的服务器移除ECS参数
@@ -494,8 +532,16 @@ export async function onRequest(context) {
           // 添加更详细的错误日志
           console.error(`详细错误信息: ${error.message}`);
           console.error(`服务器: ${server}`);
-          console.error(`请求URL: ${serverUrl.toString()}`);
-          console.error(`请求参数: ${JSON.stringify(options)}`);
+          try {
+            console.error(`请求URL: ${serverUrl.toString()}`);
+          } catch (e) {
+            console.error(`无法获取URL字符串: ${e.message}`);
+          }
+          try {
+            console.error(`请求参数: ${JSON.stringify(options)}`);
+          } catch (e) {
+            console.error(`无法序列化请求参数: ${e.message}`);
+          }
           
           // 返回一个错误响应，但不中断竞争
           return { 
@@ -509,7 +555,28 @@ export async function onRequest(context) {
       });
       
       // 使用Promise.race等待最快的响应
-      return Promise.race(promises);
+      return Promise.race(promises).then(result => {
+        // 确保至少有一个有效响应，否则返回一个有明确错误消息的对象
+        if (result && !result.error) {
+          return result;
+        }
+        
+        // 尝试找到一个有效的响应
+        return Promise.all(promises).then(results => {
+          const validResult = results.find(r => r && !r.error);
+          if (validResult) {
+            return validResult;
+          }
+          
+          // 所有响应都出错，返回第一个错误
+          return result || {
+            error: true,
+            server: '未知',
+            time: Date.now() - startTime,
+            message: '所有DNS服务器均无响应或响应错误'
+          };
+        });
+      });
     }
 
     // 执行并行查询

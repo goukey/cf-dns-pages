@@ -24,6 +24,9 @@ const DEFAULT_UPSTREAM = "https://cloudflare-dns.com/dns-query";
 // 默认并行查询的服务器列表
 const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google"];
 
+// DNS查询超时时间（毫秒）
+const REQUEST_TIMEOUT = 5000;
+
 // 预设上游服务器
 // 如需添加自己的预设服务器，请在此处添加条目
 // 格式: "服务器名称": "完整的DoH服务器URL"
@@ -202,7 +205,33 @@ function bufferToBase64Url(buffer) {
   return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-async function queryDNSServer(server, queryParams) {
+// 从请求头获取客户端IP
+function getClientIP(request) {
+  return request.headers.get('CF-Connecting-IP') || 
+         request.headers.get('X-Real-IP') || 
+         request.headers.get('X-Forwarded-For')?.split(',')[0] || 
+         '127.0.0.1';
+}
+
+// 添加ECS参数到URL
+function addECStoURL(url, ipAddress) {
+  // 如果IP地址不包含掩码，添加默认掩码
+  let ecsValue = ipAddress;
+  if (!ipAddress.includes('/')) {
+    // IPv4用/24，IPv6用/56
+    if (ipAddress.includes(':')) {
+      ecsValue = `${ipAddress}/56`;
+    } else {
+      ecsValue = `${ipAddress}/24`;
+    }
+  }
+  
+  // 添加到URL
+  url.searchParams.set('edns_client_subnet', ecsValue);
+  return url;
+}
+
+async function queryDNSServer(server, queryParams, request) {
   const startTime = Date.now();
   let hasEcs = false;
   let ecsSource = 'none';
@@ -226,7 +255,7 @@ async function queryDNSServer(server, queryParams) {
       ecsSource = 'user';
     } else if (queryParams.get(AUTO_ECS_PARAM) === 'true' && serverSupportsEcsFlag) {
       // 获取客户端IP
-      const clientIP = getClientIP();
+      const clientIP = getClientIP(request);
       if (clientIP) {
         addECStoURL(serverUrl, clientIP);
         hasEcs = true;
@@ -477,9 +506,7 @@ export async function onRequest(context) {
       
       if (autoEcs) {
         // 从请求头中获取客户端真实IP
-        const clientIP = request.headers.get('CF-Connecting-IP') || 
-                         request.headers.get('X-Real-IP') || 
-                         request.headers.get('X-Forwarded-For')?.split(',')[0];
+        const clientIP = getClientIP(request);
         
         if (clientIP) {
           // 验证IP格式 - 同时支持IPv4和IPv6
@@ -528,7 +555,7 @@ export async function onRequest(context) {
     }
 
     // 创建竞速函数，同时查询所有上游服务器，返回最快的响应
-    async function queryWithRace(servers) {
+    async function queryWithRace(servers, req) {
       // 如果服务器数组为空，抛出错误
       if (servers.length === 0) {
         throw new Error('没有可用的DNS服务器');
@@ -536,18 +563,18 @@ export async function onRequest(context) {
       
       // 如果只有一个服务器，直接查询
       if (servers.length === 1) {
-        return queryDNSServer(servers[0], queryParams);
+        return queryDNSServer(servers[0], queryParams, req);
       }
       
       // 创建Promise数组，每个Promise对应一个上游服务器的查询
-      const promises = servers.map(server => queryDNSServer(server, queryParams));
+      const promises = servers.map(server => queryDNSServer(server, queryParams, req));
       
       // 使用Promise.race获取最快的响应
       return Promise.race(promises);
     }
 
     // 执行并行查询
-    const result = await queryWithRace(upstreamServers);
+    const result = await queryWithRace(upstreamServers, request);
     
     // 检查是否有错误
     if (result.error) {
@@ -556,7 +583,7 @@ export async function onRequest(context) {
       const remainingServers = upstreamServers.filter(server => server !== result.server);
       if (remainingServers.length > 0) {
         // 还有其他服务器可用，尝试查询
-        const retryResult = await queryWithRace(remainingServers);
+        const retryResult = await queryWithRace(remainingServers, request);
         if (!retryResult.error) {
           // 找到有效响应，使用它
           return new Response(retryResult.response.body, {

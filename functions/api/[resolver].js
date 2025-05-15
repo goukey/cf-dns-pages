@@ -26,7 +26,7 @@ const FORMAT_PARAM = 'format';
 const DEFAULT_UPSTREAM = "https://cloudflare-dns.com/dns-query";
 
 // 默认并行查询的服务器列表
-const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google"];
+const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google", "aliyun", "dnspod", "adguard"];
 
 // DNS查询超时时间（毫秒）
 const REQUEST_TIMEOUT = 5000;
@@ -37,6 +37,9 @@ const REQUEST_TIMEOUT = 5000;
 const RESOLVER_SERVERS = {
   "cloudflare": "https://cloudflare-dns.com/dns-query",
   "google": "https://dns.google/dns-query",
+  "aliyun": "https://dns.alidns.com/dns-query",
+  "dnspod": "https://doh.pub/dns-query",
+  "adguard": "https://dns.adguard.com/dns-query"
 };
 
 // 预设服务器是否支持ECS
@@ -44,6 +47,9 @@ const RESOLVER_SERVERS = {
 const ECS_SUPPORT = {
   "cloudflare": false, // Cloudflare默认不支持ECS
   "google": true,      // Google支持ECS
+  "aliyun": true,      // 阿里云DNS支持ECS
+  "dnspod": true,      // DNSPod支持ECS
+  "adguard": true      // AdGuard DNS支持ECS
 };
 
 // 获取上游服务器配置

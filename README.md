@@ -4,7 +4,7 @@
 
 ## 功能特点
 
-- **智能解析**：将请求分发到全球多个高速节点（Cloudflare, Google, Quad9等）
+- **智能解析**：将请求分发到全球多个高速节点（Cloudflare, Google, 阿里云等）
 - **多节点支持**：支持在请求中动态指定上游解析节点
 - **并行查询**：同时查询多个上游服务器，返回最快的结果
 - **自动ECS**：智能识别客户端IP并自动设置适当的客户端子网
@@ -16,6 +16,7 @@
 - **简单部署**：可直接通过GitHub一键部署到Cloudflare Pages
 - **IPv6支持**：完全支持IPv6地址解析和AAAA记录查询
 - **默认并行查询**：默认情况下自动查询多个上游服务器，获取最快响应
+- **全类型记录查询**：默认返回域名的所有类型DNS记录，无需额外配置
 
 ## 部署指南
 
@@ -56,42 +57,48 @@
 ### 查询示例
 
 ```
-# 基本查询
+# 基本查询（默认返回所有类型的DNS记录）
+https://[your-domain]/api/resolver?name=example.com
+# （默认会自动并行查询多个上游服务器，返回最快的结果）
+
+# 只查询特定类型的记录
 https://[your-domain]/api/resolver?name=example.com&type=A
-# （默认会自动并行查询多个上游服务器 - cloudflare和google，返回最快的结果）
 
 # IPv6地址查询
 https://[your-domain]/api/resolver?name=example.com&type=AAAA
 
 # 强制使用单一上游服务器模式（禁用并行查询）
-https://[your-domain]/api/resolver?name=example.com&type=A&single=true
+https://[your-domain]/api/resolver?name=example.com&single=true
 
 # 指定预设上游节点
-https://[your-domain]/api/resolver?name=example.com&type=A&server=google
+https://[your-domain]/api/resolver?name=example.com&server=google
 
 # 多节点并行查询（同时查询多个上游服务器，返回最快的结果）
-https://[your-domain]/api/resolver?name=example.com&type=A&server=cloudflare,google,quad9
+https://[your-domain]/api/resolver?name=example.com&server=cloudflare,google,aliyun,dnspod
 
 # 使用所有预设节点进行并行查询
-https://[your-domain]/api/resolver?name=example.com&type=A&parallel=true
+https://[your-domain]/api/resolver?name=example.com&parallel=true
 
 # 启用自动ECS (默认已启用)
-https://[your-domain]/api/resolver?name=example.com&type=A&auto_ecs=true
+https://[your-domain]/api/resolver?name=example.com&auto_ecs=true
 
 # 禁用自动ECS
-https://[your-domain]/api/resolver?name=example.com&type=A&auto_ecs=false
+https://[your-domain]/api/resolver?name=example.com&auto_ecs=false
 
 # 手动指定ECS获取更精准的结果
-https://[your-domain]/api/resolver?name=example.com&type=A&edns_client_subnet=192.168.1.0/24
+https://[your-domain]/api/resolver?name=example.com&edns_client_subnet=192.168.1.0/24
 
 # IPv6 ECS子网指定
-https://[your-domain]/api/resolver?name=example.com&type=AAAA&edns_client_subnet=2001:db8::/56
+https://[your-domain]/api/resolver?name=example.com&edns_client_subnet=2001:db8::/56
 
 # 自定义上游服务器
-https://[your-domain]/api/resolver?name=example.com&type=A&upstream=https://your-custom-doh-server.com/dns-query
+https://[your-domain]/api/resolver?name=example.com&upstream=https://your-custom-doh-server.com/dns-query
 
 # 多个自定义上游服务器
-https://[your-domain]/api/resolver?name=example.com&type=A&upstream=https://dns1.example.com/dns-query,https://dns2.example.com/dns-query
+https://[your-domain]/api/resolver?name=example.com&upstream=https://dns1.example.com/dns-query,https://dns2.example.com/dns-query
+
+# 简洁输出格式
+https://[your-domain]/api/resolver?name=example.com&format=simple
 ```
 
 ### 在各种客户端中使用
@@ -131,29 +138,29 @@ cf-dns-pages/
 
 ### 使用方法
 
-1. **默认方式**：无需任何参数，默认会同时查询 Cloudflare 和 Google 两个上游服务器
+1. **默认方式**：无需任何参数，默认会同时查询 Cloudflare、Google、阿里云、DNSPod 和 AdGuard 等上游服务器
    ```
-   /api/resolver?name=example.com&type=A
+   /api/resolver?name=example.com
    ```
 
 2. **指定多个预设服务器**：使用逗号分隔多个服务器名称
    ```
-   /api/resolver?name=example.com&type=A&server=cloudflare,google,quad9
+   /api/resolver?name=example.com&server=cloudflare,google,aliyun,dnspod
    ```
 
 3. **使用所有预设服务器**：使用parallel=true参数
    ```
-   /api/resolver?name=example.com&type=A&parallel=true
+   /api/resolver?name=example.com&parallel=true
    ```
 
 4. **指定多个自定义服务器**：使用逗号分隔多个自定义DoH服务器URL
    ```
-   /api/resolver?name=example.com&type=A&upstream=https://dns1.example.com/dns-query,https://dns2.example.com/dns-query
+   /api/resolver?name=example.com&upstream=https://dns1.example.com/dns-query,https://dns2.example.com/dns-query
    ```
 
 5. **禁用并行查询**：如果只想使用单一服务器（Cloudflare），可以使用single=true参数
    ```
-   /api/resolver?name=example.com&type=A&single=true
+   /api/resolver?name=example.com&single=true
    ```
 
 所有响应都会包含以下HTTP头部信息：
@@ -223,8 +230,9 @@ cf-dns-pages/
 |-------|------------|
 | Cloudflare | ❌ 不支持 |
 | Google | ✅ 支持 |
-| Quad9 | ✅ 支持 |
 | 阿里云 | ✅ 支持 |
+| DNSPod | ✅ 支持 |
+| AdGuard DNS | ✅ 支持 |
 
 当查询不支持ECS的服务器时，系统会自动移除ECS参数。
 
@@ -261,8 +269,9 @@ cf-dns-pages/
    const RESOLVER_SERVERS = {
      "cloudflare": "https://cloudflare-dns.com/dns-query",
      "google": "https://dns.google/dns-query",
-     "quad9": "https://dns.quad9.net/dns-query",
      "aliyun": "https://dns.alidns.com/dns-query",
+     "dnspod": "https://doh.pub/dns-query",
+     "adguard": "https://dns.adguard.com/dns-query",
      "your-custom": "https://your-custom-doh-server.com/dns-query" // 添加您的自定义服务器
    };
    
@@ -270,8 +279,9 @@ cf-dns-pages/
    const ECS_SUPPORT = {
      "cloudflare": false,
      "google": true,
-     "quad9": true,
      "aliyun": true,
+     "dnspod": true,
+     "adguard": true,
      "your-custom": true // 如果您的服务器支持ECS，设为true，否则为false
    };
    ```
@@ -280,7 +290,7 @@ cf-dns-pages/
 
    ```js
    // 默认并行查询的服务器列表
-   const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google"];
+   const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google", "aliyun", "dnspod", "adguard"];
    ```
 
 4. **更新前端界面**：在`index.html`文件中添加新服务器的选项：
@@ -314,12 +324,12 @@ A: 确保你提供的URL是完整的HTTPS URL（包含`https://`前缀），并�
 A: 是的，并行查询会同时向多个上游服务器发送请求，这会增加一定的带宽使用量。但由于DNS查询通常很小，增加的带宽使用量通常可以忽略不计。
 
 **Q: 为什么默认使用多个上游服务器并行查询？**
-A: 并行查询多个上游服务器可以提供更快的响应速度和更高的可用性。默认情况下会同时查询Cloudflare和Google两个服务器，选择最快响应的结果返回给用户。
+A: 并行查询多个上游服务器可以提供更快的响应速度和更高的可用性。默认情况下会同时查询Cloudflare、Google、阿里云、DNSPod和AdGuard等服务器，选择最快响应的结果返回给用户。
 
 **Q: 如何禁用并行查询？**
 A: 如果您希望使用单一上游服务器而不是并行查询，可以添加`single=true`参数：
 ```
-/api/resolver?name=example.com&type=A&single=true
+/api/resolver?name=example.com&single=true
 ```
 
 **Q: 我应该使用ECS吗？**
@@ -329,7 +339,7 @@ A: 系统默认已启用自动ECS功能，大多数用户无需手动配置。�
 A: 自动ECS仅传递您IP的网络部分（IPv4为/24子网，如123.45.67.0/24；IPv6为/56子网），而不是您的完整IP地址，能在保障隐私的同时提供较精准的解析。如仍有顾虑，可通过`auto_ecs=false`参数禁用此功能。
 
 **Q: 为什么我启用ECS后部分查询仍然不生效？**
-A: 部分DNS服务器（如Cloudflare）不支持ECS扩展，查询这些服务器时ECS参数会被自动移除。如需使用ECS，请选择支持ECS的上游服务器（如Google、Quad9或阿里云）。
+A: 部分DNS服务器（如Cloudflare）不支持ECS扩展，查询这些服务器时ECS参数会被自动移除。如需使用ECS，请选择支持ECS的上游服务器（如Google、阿里云或DNSPod）。
 
 **Q: 如何查询IPv6地址？**
 A: 直接在查询中使用`type=AAAA`参数，例如：`/api/resolver?name=example.com&type=AAAA`。
@@ -339,3 +349,102 @@ A: 直接在查询中使用`type=AAAA`参数，例如：`/api/resolver?name=exam
 本服务仅转发请求，不会记录或存储任何查询内容。但请注意，上游解析服务提供商可能会根据其隐私政策记录查询日志。
 
 自动ECS功能传递的子网信息（IPv4为/24，IPv6为/56）仅包含IP地址的网络部分，不会泄露您的完整IP，在提供精准解析的同时也能合理保护隐私。但如果对隐私有严格要求，您可以通过`auto_ecs=false`参数禁用此功能。
+
+## 多类型DNS记录查询
+
+本服务默认返回域名的所有类型DNS记录，为用户提供完整的DNS解析信息：
+
+### 默认全类型查询
+
+不指定`type`参数时，系统会自动返回域名的所有可用记录类型：
+
+```
+/api/resolver?name=example.com&format=simple
+```
+
+返回的数据会包含A、AAAA、CNAME、MX、TXT、NS等多种记录类型。
+
+### 特定类型查询
+
+如果只需要特定类型的记录，可以使用`type`参数指定：
+
+```
+/api/resolver?name=example.com&type=A&format=simple
+```
+
+### 输出格式示例
+
+使用简洁输出格式时，全类型查询将返回类似下面的JSON结构：
+
+```json
+{
+  "domain": "example.com",
+  "records": {
+    "A": [
+      { "name": "example.com", "value": "93.184.216.34", "ttl": 86400 }
+    ],
+    "AAAA": [
+      { "name": "example.com", "value": "2606:2800:220:1:248:1893:25c8:1946", "ttl": 86400 }
+    ],
+    "MX": [
+      { "name": "example.com", "value": { "preference": 10, "exchange": "mail.example.com" }, "ttl": 86400 }
+    ],
+    "TXT": [
+      { "name": "example.com", "value": "v=spf1 -all", "ttl": 86400 }
+    ],
+    "NS": [
+      { "name": "example.com", "value": "ns1.example.com", "ttl": 86400 },
+      { "name": "example.com", "value": "ns2.example.com", "ttl": 86400 }
+    ]
+  },
+  "server": "https://dns.google/dns-query",
+  "response_time_ms": 45
+}
+```
+
+使用纯文本格式时，会以类似nslookup的易读格式显示：
+
+```
+域名: example.com
+服务器: https://dns.google/dns-query
+响应时间: 45ms
+
+== A 记录 ==
+1. example.com 93.184.216.34
+
+== AAAA 记录 ==
+1. example.com 2606:2800:220:1:248:1893:25c8:1946
+
+== MX 记录 ==
+1. example.com [优先级: 10] mail.example.com
+
+== TXT 记录 ==
+1. example.com v=spf1 -all
+
+== NS 记录 ==
+1. example.com ns1.example.com
+2. example.com ns2.example.com
+```
+
+### 应用场景
+
+全类型记录查询功能在以下场景非常有用：
+
+1. **域名信息收集** - 一次查询获取域名的所有配置信息
+2. **DNS诊断与排障** - 快速检查域名的所有记录是否正确配置
+3. **域名迁移** - 方便收集旧域名的所有DNS记录信息，以便于在新服务商重新配置
+4. **安全分析** - 用于收集域名的完整DNS配置以进行安全分析
+
+## 预设DNS服务器
+
+本服务内置了以下几个预设的DNS服务器：
+
+| 服务器名称 | URL | 支持ECS |
+|----------|-----|--------|
+| Cloudflare | https://cloudflare-dns.com/dns-query | ❌ 不支持 |
+| Google | https://dns.google/dns-query | ✅ 支持 |
+| 阿里云DNS | https://dns.alidns.com/dns-query | ✅ 支持 |
+| DNSPod | https://doh.pub/dns-query | ✅ 支持 |
+| AdGuard DNS | https://dns.adguard.com/dns-query | ✅ 支持 |
+
+默认情况下，系统会并行查询上述服务器，并返回最快的响应结果。

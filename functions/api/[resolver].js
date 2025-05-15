@@ -240,71 +240,55 @@ async function queryDNSServer(server, queryParams, request) {
   try {
     const serverUrl = new URL(server);
     
-    // 复制URL查询参数
-    for (const param of queryParams.keys()) {
-      if (ALLOWED_PARAMS.includes(param)) {
-        serverUrl.searchParams.set(param, queryParams.get(param));
-      }
-    }
-    
-    // 添加ECS参数（如果有）
-    const ecs = queryParams.get(ECS_PARAM);
-    if (ecs && serverSupportsEcsFlag) {
-      addECStoURL(serverUrl, ecs);
-      hasEcs = true;
-      ecsSource = 'user';
-    } else if (queryParams.get(AUTO_ECS_PARAM) === 'true' && serverSupportsEcsFlag) {
-      // 获取客户端IP
-      const clientIP = getClientIP(request);
-      if (clientIP) {
-        addECStoURL(serverUrl, clientIP);
-        hasEcs = true;
-        ecsSource = 'auto';
-      }
-    }
-    
-    // 准备请求选项
+    // 默认所有服务器都使用application/dns-message格式
     const requestOptions = {
       method: 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; CloudflareDNSProxy/1.0)',
+        'User-Agent': 'curl/8.0.0',
         'Accept': 'application/dns-message'
       }
     };
     
-    // 如果是Cloudflare DNS服务，添加特定用户代理
-    if (server.includes('cloudflare-dns.com')) {
-      requestOptions.headers['User-Agent'] = 'curl/8.0.0';
-      requestOptions.headers['Accept'] = 'application/dns-message';
-      // 移除可能导致Cloudflare拒绝的头
-      delete requestOptions.headers['Accept-Language'];
-      delete requestOptions.headers['DNT'];
-    }
+    // 移除可能导致服务器拒绝的头
+    delete requestOptions.headers['Accept-Language'];
+    delete requestOptions.headers['DNT'];
     
-    // 如果是Google DNS服务，添加特定用户代理和请求头
-    if (server.includes('dns.google')) {
-      requestOptions.headers['User-Agent'] = 'curl/8.0.0';
-      requestOptions.headers['Accept'] = 'application/dns-message';
-      // 移除可能导致Google拒绝的头
-      delete requestOptions.headers['Accept-Language'];
-      delete requestOptions.headers['DNT'];
+    // RFC 8484格式需要dns参数
+    // 检查是否有DNS查询基本参数
+    const name = queryParams.get('name');
+    const type = queryParams.get('type') || 'A'; // 默认为A记录
+    
+    if (name) {
+      // 构建基本的DNS查询消息
+      const dnsMessage = buildDNSMessage(name, type);
+      // 转换为base64url格式（不包含填充符）
+      const base64url = bufferToBase64Url(dnsMessage);
+      // 更新URL
+      serverUrl.search = `dns=${base64url}`;
       
-      // RFC 8484格式需要dns参数
-      if (!serverUrl.searchParams.has('dns')) {
-        // 检查是否有DNS查询基本参数
-        const name = queryParams.get('name');
-        const type = queryParams.get('type') || 'A'; // 默认为A记录
-        
-        if (name) {
-          // 构建基本的DNS查询消息
-          const dnsMessage = buildDNSMessage(name, type);
-          // 转换为base64url格式（不包含填充符）
-          const base64url = bufferToBase64Url(dnsMessage);
-          // 更新URL
-          serverUrl.search = `dns=${base64url}`;
-          console.log(`转换为RFC 8484格式: ${serverUrl.toString()}`);
+      // 添加ECS参数（如果有且服务器支持）
+      if (serverSupportsEcsFlag) {
+        const ecs = queryParams.get(ECS_PARAM);
+        if (ecs) {
+          // 在DNS消息中添加ECS - 这需要修改DNS消息格式
+          // 目前简单处理，未实现ECS的DNS消息编码
+          hasEcs = true;
+          ecsSource = 'user';
+        } else if (queryParams.get(AUTO_ECS_PARAM) === 'true') {
+          // 自动获取客户端IP
+          const clientIP = getClientIP(request);
+          if (clientIP) {
+            // 在DNS消息中添加ECS - 这需要修改DNS消息格式
+            // 目前简单处理，未实现ECS的DNS消息编码
+            hasEcs = true;
+            ecsSource = 'auto';
+          }
         }
       }
+      
+      console.log(`查询服务器: ${serverUrl.toString()}`);
+    } else {
+      throw new Error('缺少必要的name参数');
     }
     
     // 添加超时

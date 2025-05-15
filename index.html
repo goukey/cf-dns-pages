@@ -184,7 +184,7 @@
                 </ul>
                 
                 <h5>示例</h5>
-                <p>基本查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A</code><br><small class="text-muted">默认并行查询Cloudflare和Google，返回最快结果</small></p>
+                <p>基本查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A</code><br><small class="text-muted">默认并行查询Cloudflare和DNSPod，返回最快结果</small></p>
                 <p>IPv6地址查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=AAAA</code></p>
                 <p>单一服务器模式：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&single=true</code></p>
                 <p>指定节点：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&server=google</code></p>
@@ -379,6 +379,21 @@
         name: "阿里云",
         url: "https://dns.alidns.com/dns-query",
         supportsEcs: true
+      },
+      "dnspod": {
+        name: "DNSPod",
+        url: "https://doh.pub/dns-query",
+        supportsEcs: true
+      },
+      "rubyfish": {
+        name: "RubyFish",
+        url: "https://rubyfish.cn/dns-query",
+        supportsEcs: true
+      },
+      "adguard": {
+        name: "AdGuard",
+        url: "https://dns.adguard.com/dns-query",
+        supportsEcs: false
       }
     };
 

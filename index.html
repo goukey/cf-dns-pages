@@ -294,6 +294,36 @@
                 </div>
               </div>
               
+              <div class="mb-3">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="enable-redirect">
+                  <label class="form-check-label" for="enable-redirect">启用重定向模式</label>
+                </div>
+                <div class="form-text">选中此项后，将直接重定向到解析后的IP地址，而不是显示DNS结果</div>
+              </div>
+              
+              <div id="redirect-settings" class="mb-3 hidden">
+                <div class="mb-2">
+                  <label for="protocol" class="form-label">协议</label>
+                  <select class="form-select" id="protocol">
+                    <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
+                  </select>
+                </div>
+                
+                <div class="mb-2">
+                  <label for="port" class="form-label">端口 (可选)</label>
+                  <input type="text" class="form-control" id="port" placeholder="例如: 8080">
+                </div>
+                
+                <div class="mb-2">
+                  <label for="path" class="form-label">路径 (可选)</label>
+                  <input type="text" class="form-control" id="path" placeholder="例如: /index.html">
+                </div>
+                
+                <div class="form-text">注意: 重定向模式将直接将您带到解析的IP地址，可能会出现SSL证书错误</div>
+              </div>
+              
               <button type="submit" class="btn btn-primary w-100">执行查询</button>
             </form>
             
@@ -732,6 +762,16 @@
       });
     });
     
+    // 切换重定向设置显示
+    document.getElementById('enable-redirect').addEventListener('change', function() {
+      const redirectSettings = document.getElementById('redirect-settings');
+      if (this.checked) {
+        redirectSettings.classList.remove('hidden');
+      } else {
+        redirectSettings.classList.add('hidden');
+      }
+    });
+    
     // 查询表单提交
     document.getElementById('query-form').addEventListener('submit', async function(event) {
       event.preventDefault();
@@ -835,6 +875,31 @@
         } else {
           // 明确禁用自动ECS
           queryUrl += `&auto_ecs=false`;
+        }
+        
+        // 添加重定向参数
+        if (document.getElementById('enable-redirect').checked) {
+          queryUrl += `&redirect=true`;
+          
+          // 添加协议
+          const protocol = document.getElementById('protocol').value;
+          queryUrl += `&protocol=${encodeURIComponent(protocol)}`;
+          
+          // 添加端口（如果有）
+          const port = document.getElementById('port').value.trim();
+          if (port) {
+            queryUrl += `&port=${encodeURIComponent(port)}`;
+          }
+          
+          // 添加路径（如果有）
+          const path = document.getElementById('path').value.trim();
+          if (path) {
+            queryUrl += `&path=${encodeURIComponent(path)}`;
+          }
+          
+          // 在重定向模式下，直接打开URL而不是AJAX请求
+          window.location.href = queryUrl;
+          return; // 停止继续执行
         }
         
         // 执行查询

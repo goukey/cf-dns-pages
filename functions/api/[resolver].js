@@ -17,6 +17,10 @@ const ECS_PARAM = 'edns_client_subnet';
 const AUTO_ECS_PARAM = 'auto_ecs';
 // 单一服务器模式参数（禁用并行查询）
 const SINGLE_MODE_PARAM = 'single';
+// 重定向模式参数
+const REDIRECT_PARAM = 'redirect';
+// DNS查询结果格式参数
+const FORMAT_PARAM = 'format';
 
 // 默认上游服务器
 const DEFAULT_UPSTREAM = "https://cloudflare-dns.com/dns-query";
@@ -325,6 +329,109 @@ async function queryDNSServer(server, queryParams, request) {
   }
 }
 
+// 从DNS响应中提取IP地址
+function extractIPsFromDNSResponse(buffer, recordType = 'A') {
+  try {
+    // 创建数据视图
+    const view = new DataView(buffer);
+    
+    // 解析DNS头部
+    const qdcount = view.getUint16(4); // 问题计数
+    const ancount = view.getUint16(6); // 回答计数
+    
+    if (ancount === 0) {
+      return []; // 没有回答记录
+    }
+    
+    // 跳过查询部分
+    let offset = 12; // DNS头部长度为12字节
+    
+    // 跳过所有问题
+    for (let i = 0; i < qdcount; i++) {
+      // 跳过域名
+      while (true) {
+        const len = view.getUint8(offset);
+        if (len === 0) {
+          offset += 1;
+          break;
+        }
+        if ((len & 0xc0) === 0xc0) {
+          // 压缩标签
+          offset += 2;
+          break;
+        }
+        offset += len + 1;
+      }
+      
+      // 跳过类型和类
+      offset += 4;
+    }
+    
+    // 解析回答记录
+    const ips = [];
+    for (let i = 0; i < ancount; i++) {
+      // 跳过域名
+      while (true) {
+        const len = view.getUint8(offset);
+        if (len === 0) {
+          offset += 1;
+          break;
+        }
+        if ((len & 0xc0) === 0xc0) {
+          // 压缩标签
+          offset += 2;
+          break;
+        }
+        offset += len + 1;
+      }
+      
+      // 读取记录类型
+      const type = view.getUint16(offset);
+      offset += 2;
+      
+      // 跳过类
+      offset += 2;
+      
+      // 跳过TTL
+      offset += 4;
+      
+      // 读取数据长度
+      const rdlength = view.getUint16(offset);
+      offset += 2;
+      
+      // 检查记录类型是否匹配
+      const isTypeA = (type === 1 && recordType.toUpperCase() === 'A');
+      const isTypeAAAA = (type === 28 && recordType.toUpperCase() === 'AAAA');
+      
+      if (isTypeA) {
+        // A记录（IPv4地址）
+        if (rdlength === 4) {
+          const ip = `${view.getUint8(offset)}.${view.getUint8(offset+1)}.${view.getUint8(offset+2)}.${view.getUint8(offset+3)}`;
+          ips.push(ip);
+        }
+      } else if (isTypeAAAA) {
+        // AAAA记录（IPv6地址）
+        if (rdlength === 16) {
+          let ip = '';
+          for (let j = 0; j < 8; j++) {
+            const hexPart = view.getUint16(offset + j * 2).toString(16);
+            ip += (j > 0 ? ':' : '') + hexPart;
+          }
+          ips.push(ip);
+        }
+      }
+      
+      // 跳过数据
+      offset += rdlength;
+    }
+    
+    return ips;
+  } catch (error) {
+    console.error('解析DNS响应时出错:', error);
+    return [];
+  }
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
@@ -601,7 +708,51 @@ export async function onRequest(context) {
         }
       });
     }
-
+    
+    // 检查是否需要重定向模式
+    const redirectMode = url.searchParams.get(REDIRECT_PARAM) === 'true';
+    if (redirectMode) {
+      try {
+        // 获取响应体
+        const dnsResponseBody = await result.response.arrayBuffer();
+        // 解析DNS响应
+        const resolvedIPs = extractIPsFromDNSResponse(dnsResponseBody, queryParams.get('type') || 'A');
+        
+        if (resolvedIPs && resolvedIPs.length > 0) {
+          // 获取第一个IP地址
+          const firstIP = resolvedIPs[0];
+          
+          // 构建协议（默认http）
+          const protocol = url.searchParams.get('protocol') || 'http';
+          
+          // 构建端口（如果有）
+          const port = url.searchParams.get('port') ? `:${url.searchParams.get('port')}` : '';
+          
+          // 构建路径（如果有）
+          const path = url.searchParams.get('path') || '';
+          
+          // 构建重定向URL
+          const redirectURL = `${protocol}://${firstIP}${port}${path}`;
+          
+          // 返回重定向响应
+          return new Response(null, {
+            status: 302,
+            headers: {
+              'Location': redirectURL,
+              'Access-Control-Allow-Origin': '*',
+              'X-DNS-Upstream': result.server,
+              'X-DNS-Response-Time': `${result.time}ms`,
+              'X-DNS-Resolved-IP': firstIP,
+              'X-DNS-All-IPs': resolvedIPs.join(', ')
+            }
+          });
+        }
+      } catch (error) {
+        console.error('处理重定向时出错:', error);
+        // 继续使用普通响应
+      }
+    }
+    
     // 返回最快的有效响应
     return new Response(result.response.body, {
       status: result.response.status,

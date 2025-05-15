@@ -308,6 +308,7 @@ export async function onRequest(context) {
       method: method,
       headers: {
         'User-Agent': 'DNS-Resolver/1.0',
+        'Accept': 'application/dns-json'
       },
     };
 
@@ -330,68 +331,91 @@ export async function onRequest(context) {
       
       // 如果只有一个服务器，直接查询不需要竞争
       if (servers.length === 1) {
-        const serverUrl = new URL('/dns-query', new URL(servers[0]).origin);
-        serverUrl.search = queryParams.toString();
-        
-        // 对于不支持ECS的服务器，移除ECS参数
-        let serverSupportsEcsFlag = true;
-        if (hasEcs) {
-          // 尝试查找服务器在预设列表中的名称
-          const serverName = Object.keys(RESOLVER_SERVERS).find(
-            key => RESOLVER_SERVERS[key] === servers[0]
-          );
-          
-          if (serverName && !serverSupportsECS(serverName)) {
-            const nonEcsParams = new URLSearchParams(queryParams);
-            nonEcsParams.delete('edns_client_subnet');
-            serverUrl.search = nonEcsParams.toString();
-            serverSupportsEcsFlag = false;
+        // 确保URL包含dns-query路径
+        let serverUrl;
+        try {
+          if (servers[0].includes('/dns-query')) {
+            serverUrl = new URL(servers[0]);
+          } else {
+            serverUrl = new URL(servers[0].endsWith('/') ? 
+                              servers[0] + 'dns-query' : 
+                              servers[0] + '/dns-query');
           }
+          serverUrl.search = queryParams.toString();
+
+          // 对于不支持ECS的服务器，移除ECS参数
+          let serverSupportsEcsFlag = true;
+          if (hasEcs) {
+            // 尝试查找服务器在预设列表中的名称
+            const serverName = Object.keys(RESOLVER_SERVERS).find(
+              key => RESOLVER_SERVERS[key] === servers[0]
+            );
+            
+            if (serverName && !serverSupportsECS(serverName)) {
+              const nonEcsParams = new URLSearchParams(queryParams);
+              nonEcsParams.delete('edns_client_subnet');
+              serverUrl.search = nonEcsParams.toString();
+              serverSupportsEcsFlag = false;
+            }
+          }
+
+          console.log(`查询服务器: ${serverUrl.toString()}`);
+          const response = await fetch(serverUrl.toString(), requestOptions);
+          const endTime = Date.now();
+          return { 
+            response, 
+            server: servers[0], 
+            time: endTime - startTime,
+            hasEcs,
+            ecsSource,
+            serverSupportsEcs: serverSupportsEcsFlag
+          };
+        } catch (error) {
+          console.error(`解析或查询服务器URL出错: ${servers[0]}`, error);
+          throw error;
         }
-        
-        const response = await fetch(serverUrl.toString(), requestOptions);
-        const endTime = Date.now();
-        return { 
-          response, 
-          server: servers[0], 
-          time: endTime - startTime,
-          hasEcs,
-          ecsSource,
-          serverSupportsEcs: serverSupportsEcsFlag
-        };
       }
       
       // 创建Promise数组，每个Promise对应一个上游服务器的查询
       const promises = servers.map(async (server) => {
-        const serverUrl = new URL('/dns-query', new URL(server).origin);
-        
-        // 处理ECS参数，对于不支持ECS的服务器移除ECS参数
-        let serverSupportsEcsFlag = true;
-        if (hasEcs) {
-          // 尝试查找服务器在预设列表中的名称
-          const serverName = Object.keys(RESOLVER_SERVERS).find(
-            key => RESOLVER_SERVERS[key] === server
-          );
+        try {
+          // 确保URL包含dns-query路径
+          let serverUrl;
+          if (server.includes('/dns-query')) {
+            serverUrl = new URL(server);
+          } else {
+            serverUrl = new URL(server.endsWith('/') ? 
+                            server + 'dns-query' : 
+                            server + '/dns-query');
+          }
           
-          if (serverName && !serverSupportsECS(serverName)) {
-            const nonEcsParams = new URLSearchParams(queryParams);
-            nonEcsParams.delete('edns_client_subnet');
-            serverUrl.search = nonEcsParams.toString();
-            serverSupportsEcsFlag = false;
+          // 处理ECS参数，对于不支持ECS的服务器移除ECS参数
+          let serverSupportsEcsFlag = true;
+          if (hasEcs) {
+            // 尝试查找服务器在预设列表中的名称
+            const serverName = Object.keys(RESOLVER_SERVERS).find(
+              key => RESOLVER_SERVERS[key] === server
+            );
+            
+            if (serverName && !serverSupportsECS(serverName)) {
+              const nonEcsParams = new URLSearchParams(queryParams);
+              nonEcsParams.delete('edns_client_subnet');
+              serverUrl.search = nonEcsParams.toString();
+              serverSupportsEcsFlag = false;
+            } else {
+              serverUrl.search = queryParams.toString();
+            }
           } else {
             serverUrl.search = queryParams.toString();
           }
-        } else {
-          serverUrl.search = queryParams.toString();
-        }
-        
-        // 使用clone避免body已被读取的问题
-        const options = { ...requestOptions };
-        if (method === 'POST' && options.body) {
-          options.body = options.body.slice(0);
-        }
-        
-        try {
+          
+          // 使用clone避免body已被读取的问题
+          const options = { ...requestOptions };
+          if (method === 'POST' && options.body) {
+            options.body = options.body.slice(0);
+          }
+          
+          console.log(`并行查询服务器: ${serverUrl.toString()}`);
           const response = await fetch(serverUrl.toString(), options);
           const endTime = Date.now();
           return { 
@@ -477,6 +501,9 @@ export async function onRequest(context) {
     const contentType = result.response.headers.get('content-type');
     if (contentType) {
       responseHeaders.set('content-type', contentType);
+    } else {
+      // 如果上游没有提供content-type，使用默认的application/dns-json
+      responseHeaders.set('content-type', 'application/dns-json');
     }
 
     // 返回最快上游服务器的响应

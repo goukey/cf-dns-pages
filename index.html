@@ -232,7 +232,7 @@
               <div class="mb-3">
                 <label for="server-type" class="form-label">上游服务器</label>
                 <select class="form-select" id="server-type" onchange="toggleServerOptions()">
-                  <option value="default">默认并行服务器 (Cloudflare + DNSPod)</option>
+                  <option value="default">默认并行服务器 (Cloudflare + Google)</option>
                   <option value="single">单一服务器 (Cloudflare)</option>
                   <option value="predefined">选择预设服务器</option>
                   <option value="all">所有预设服务器</option>
@@ -367,33 +367,8 @@
       },
       "google": {
         name: "Google",
-        url: "https://dns.google/dns-query",
+        url: "https://dns.google/resolve",
         supportsEcs: true
-      },
-      "quad9": {
-        name: "Quad9",
-        url: "https://dns.quad9.net/dns-query",
-        supportsEcs: true
-      },
-      "aliyun": {
-        name: "阿里云",
-        url: "https://dns.alidns.com/dns-query",
-        supportsEcs: true
-      },
-      "dnspod": {
-        name: "DNSPod",
-        url: "https://doh.pub/dns-query",
-        supportsEcs: true
-      },
-      "rubyfish": {
-        name: "RubyFish",
-        url: "https://rubyfish.cn/dns-query",
-        supportsEcs: true
-      },
-      "adguard": {
-        name: "AdGuard",
-        url: "https://dns.adguard.com/dns-query",
-        supportsEcs: false
       }
     };
 

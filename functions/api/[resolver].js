@@ -22,19 +22,14 @@ const SINGLE_MODE_PARAM = 'single';
 const DEFAULT_UPSTREAM = "https://cloudflare-dns.com/dns-query";
 
 // 默认并行查询的服务器列表
-const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "dnspod"];
+const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google"];
 
 // 预设上游服务器
 // 如需添加自己的预设服务器，请在此处添加条目
 // 格式: "服务器名称": "完整的DoH服务器URL"
 const RESOLVER_SERVERS = {
   "cloudflare": "https://cloudflare-dns.com/dns-query",
-  "google": "https://dns.google/dns-query",
-  "quad9": "https://dns.quad9.net/dns-query",
-  "aliyun": "https://dns.alidns.com/dns-query",
-  "dnspod": "https://doh.pub/dns-query",
-  "rubyfish": "https://rubyfish.cn/dns-query",
-  "adguard": "https://dns.adguard.com/dns-query",
+  "google": "https://dns.google/resolve",
   // 可添加更多服务器，例如:
   // "example": "https://doh.example.com/dns-query"
 };
@@ -44,11 +39,6 @@ const RESOLVER_SERVERS = {
 const ECS_SUPPORT = {
   "cloudflare": false, // Cloudflare默认不支持ECS
   "google": true,      // Google支持ECS
-  "quad9": true,       // Quad9支持ECS
-  "aliyun": true,      // 阿里云支持ECS
-  "dnspod": true,      // DNSPod支持ECS
-  "rubyfish": true,    // RubyFish支持ECS
-  "adguard": false,    // AdGuard不支持ECS
   // 与上方服务器对应，例如:
   // "example": true    // 如果支持ECS则为true，否则为false
 };

@@ -22,7 +22,7 @@ const SINGLE_MODE_PARAM = 'single';
 const DEFAULT_UPSTREAM = "https://cloudflare-dns.com/dns-query";
 
 // 默认并行查询的服务器列表
-const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google"];
+const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "dnspod"];
 
 // 预设上游服务器
 // 如需添加自己的预设服务器，请在此处添加条目
@@ -32,6 +32,9 @@ const RESOLVER_SERVERS = {
   "google": "https://dns.google/dns-query",
   "quad9": "https://dns.quad9.net/dns-query",
   "aliyun": "https://dns.alidns.com/dns-query",
+  "dnspod": "https://doh.pub/dns-query",
+  "rubyfish": "https://rubyfish.cn/dns-query",
+  "adguard": "https://dns.adguard.com/dns-query",
   // 可添加更多服务器，例如:
   // "example": "https://doh.example.com/dns-query"
 };
@@ -43,6 +46,9 @@ const ECS_SUPPORT = {
   "google": true,      // Google支持ECS
   "quad9": true,       // Quad9支持ECS
   "aliyun": true,      // 阿里云支持ECS
+  "dnspod": true,      // DNSPod支持ECS
+  "rubyfish": true,    // RubyFish支持ECS
+  "adguard": false,    // AdGuard不支持ECS
   // 与上方服务器对应，例如:
   // "example": true    // 如果支持ECS则为true，否则为false
 };
@@ -307,8 +313,11 @@ export async function onRequest(context) {
     let requestOptions = {
       method: method,
       headers: {
-        'User-Agent': 'DNS-Resolver/1.0',
-        'Accept': 'application/dns-json'
+        'User-Agent': 'Mozilla/5.0 (compatible; DNS-Resolver/2.0)',
+        'Accept': 'application/dns-json, application/json, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'DNT': '1',
+        'Connection': 'keep-alive'
       },
     };
 
@@ -334,14 +343,24 @@ export async function onRequest(context) {
         // 确保URL包含dns-query路径
         let serverUrl;
         try {
-          if (servers[0].includes('/dns-query')) {
+          // 更智能地处理不同DNS服务器的URL格式
+          if (servers[0].includes('/dns-query') || servers[0].includes('?dns=')) {
+            // 已经包含完整路径的情况
             serverUrl = new URL(servers[0]);
+          } else if (servers[0].includes('?')) {
+            // 已经有查询参数但没有dns-query路径
+            serverUrl = new URL(servers[0] + '&dns=' + encodeURIComponent(JSON.stringify(queryParams)));
           } else {
+            // 标准情况：添加dns-query路径
             serverUrl = new URL(servers[0].endsWith('/') ? 
                               servers[0] + 'dns-query' : 
                               servers[0] + '/dns-query');
           }
-          serverUrl.search = queryParams.toString();
+          
+          // 仅当URL不包含'?dns='才添加查询参数
+          if (!servers[0].includes('?dns=')) {
+            serverUrl.search = queryParams.toString();
+          }
 
           // 对于不支持ECS的服务器，移除ECS参数
           let serverSupportsEcsFlag = true;
@@ -360,8 +379,22 @@ export async function onRequest(context) {
           }
 
           console.log(`查询服务器: ${serverUrl.toString()}`);
-          const response = await fetch(serverUrl.toString(), requestOptions);
+          
+          // 添加超时控制
+          const fetchPromise = fetch(serverUrl.toString(), requestOptions);
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('DNS查询超时')), 5000) // 5秒超时
+          );
+          
+          // 竞争超时和正常查询
+          const response = await Promise.race([fetchPromise, timeoutPromise]);
           const endTime = Date.now();
+          
+          // 验证响应是否有效
+          if (!response.ok) {
+            throw new Error(`DNS服务器响应错误: ${response.status} ${response.statusText}`);
+          }
+          
           return { 
             response, 
             server: servers[0], 
@@ -381,12 +414,28 @@ export async function onRequest(context) {
         try {
           // 确保URL包含dns-query路径
           let serverUrl;
-          if (server.includes('/dns-query')) {
-            serverUrl = new URL(server);
-          } else {
-            serverUrl = new URL(server.endsWith('/') ? 
-                            server + 'dns-query' : 
-                            server + '/dns-query');
+          try {
+            // 更智能地处理不同DNS服务器的URL格式
+            if (server.includes('/dns-query') || server.includes('?dns=')) {
+              // 已经包含完整路径的情况
+              serverUrl = new URL(server);
+            } else if (server.includes('?')) {
+              // 已经有查询参数但没有dns-query路径
+              serverUrl = new URL(server + '&dns=' + encodeURIComponent(JSON.stringify(queryParams)));
+            } else {
+              // 标准情况：添加dns-query路径
+              serverUrl = new URL(server.endsWith('/') ? 
+                              server + 'dns-query' : 
+                              server + '/dns-query');
+            }
+            
+            // 仅当URL不包含'?dns='才添加查询参数
+            if (!server.includes('?dns=')) {
+              serverUrl.search = queryParams.toString();
+            }
+          } catch (error) {
+            console.error(`处理服务器URL出错: ${server}`, error);
+            throw error;
           }
           
           // 处理ECS参数，对于不支持ECS的服务器移除ECS参数
@@ -416,8 +465,22 @@ export async function onRequest(context) {
           }
           
           console.log(`并行查询服务器: ${serverUrl.toString()}`);
-          const response = await fetch(serverUrl.toString(), options);
+          
+          // 添加超时控制
+          const fetchPromise = fetch(serverUrl.toString(), options);
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('DNS查询超时')), 5000) // 5秒超时
+          );
+          
+          // 竞争超时和正常查询
+          const response = await Promise.race([fetchPromise, timeoutPromise]);
           const endTime = Date.now();
+          
+          // 验证响应是否有效
+          if (!response.ok) {
+            throw new Error(`DNS服务器响应错误: ${response.status} ${response.statusText}`);
+          }
+          
           return { 
             response, 
             server, 
@@ -428,12 +491,19 @@ export async function onRequest(context) {
           };
         } catch (error) {
           console.error(`查询${server}失败:`, error);
+          // 添加更详细的错误日志
+          console.error(`详细错误信息: ${error.message}`);
+          console.error(`服务器: ${server}`);
+          console.error(`请求URL: ${serverUrl.toString()}`);
+          console.error(`请求参数: ${JSON.stringify(options)}`);
+          
           // 返回一个错误响应，但不中断竞争
           return { 
             error: true, 
             server, 
             time: Date.now() - startTime,
-            message: error.message 
+            message: error.message,
+            detail: `查询${server}失败: ${error.message}`
           };
         }
       });
@@ -487,6 +557,8 @@ export async function onRequest(context) {
       // 添加自定义响应头，包含响应来源和响应时间
       'X-DNS-Upstream': result.server,
       'X-DNS-Response-Time': `${result.time}ms`,
+      'X-DNS-Debug': 'If you see this, your request was successfully processed',
+      'X-DNS-Query-Params': url.searchParams.toString(),
     });
     
     // 如果使用了ECS，添加到响应头
@@ -514,16 +586,26 @@ export async function onRequest(context) {
     });
   } catch (error) {
     console.error('处理DNS解析请求时出错:', error);
+    
+    // 返回更友好的错误响应，并添加额外的调试信息
     return new Response(JSON.stringify({
-      error: '服务器内部错误',
+      error: '上游服务器错误',
       message: error.message,
-      stack: error.stack,
+      details: '所有上游DNS服务器均无法成功响应此查询',
+      servers_tried: upstreamServers || [],
+      query: {
+        name: domainName,
+        type: recordType,
+        params: Object.fromEntries(url.searchParams.entries())
+      },
       debug: debugInfo
     }), { 
-      status: 500,
+      status: 502, // 使用502 Bad Gateway更合适
       headers: {
         'Content-Type': 'application/json;charset=UTF-8',
-        'Access-Control-Allow-Origin': '*'
+        'Access-Control-Allow-Origin': '*',
+        'X-Error-Source': 'DNS-Resolver',
+        'X-Error-Type': 'Upstream failure'
       }
     });
   }

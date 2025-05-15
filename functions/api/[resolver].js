@@ -29,7 +29,7 @@ const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google"];
 // 格式: "服务器名称": "完整的DoH服务器URL"
 const RESOLVER_SERVERS = {
   "cloudflare": "https://cloudflare-dns.com/dns-query",
-  "google": "https://dns.google/resolve",
+  "google": "https://dns.google/dns-query",
   // 可添加更多服务器，例如:
   // "example": "https://doh.example.com/dns-query"
 };
@@ -114,6 +114,202 @@ function expandIPv6Address(address) {
   
   // 已经是完整格式
   return address;
+}
+
+// 构建基础DNS查询消息
+function buildDNSMessage(domainName, recordType) {
+  // DNS 请求ID（随机16位）
+  const id = Math.floor(Math.random() * 65536);
+  
+  // 第一个字节: 第1-2位设置为0（标准查询）,后续字段都为0
+  // 第二个字节: RD位设置为1（期望递归）,其他都为0
+  const flags = 0x0100; // 二进制：00000001 00000000
+  
+  // 只有一个问题
+  const qdcount = 1;
+  // 其他字段都是0
+  const ancount = 0;
+  const nscount = 0;
+  const arcount = 0;
+  
+  // 构建查询问题
+  // 拆分域名为各段标签
+  const labels = domainName.split('.');
+  
+  // 计算域名编码后的长度
+  const domainBytes = labels.reduce((acc, label) => acc + label.length + 1, 0) + 1;
+  
+  // 构建二进制消息数组
+  const message = new Uint8Array(12 + domainBytes + 4);
+  
+  // 填充头部
+  message[0] = id >> 8; // ID高字节
+  message[1] = id & 0xff; // ID低字节
+  message[2] = flags >> 8; // flags高字节
+  message[3] = flags & 0xff; // flags低字节
+  message[4] = qdcount >> 8; // QDCOUNT高字节
+  message[5] = qdcount & 0xff; // QDCOUNT低字节
+  // ANCOUNT, NSCOUNT, ARCOUNT都为0
+  
+  // 填充查询域
+  let offset = 12;
+  for (const label of labels) {
+    message[offset++] = label.length; // 标签长度
+    // 填充标签字符
+    for (let i = 0; i < label.length; i++) {
+      message[offset++] = label.charCodeAt(i);
+    }
+  }
+  // 添加根标签
+  message[offset++] = 0;
+  
+  // 确定记录类型
+  let qtype = 1; // 默认为A记录
+  switch (recordType.toUpperCase()) {
+    case 'A': qtype = 1; break;
+    case 'AAAA': qtype = 28; break;
+    case 'CNAME': qtype = 5; break;
+    case 'MX': qtype = 15; break;
+    case 'TXT': qtype = 16; break;
+    case 'NS': qtype = 2; break;
+    case 'SOA': qtype = 6; break;
+    case 'SRV': qtype = 33; break;
+    case 'PTR': qtype = 12; break;
+    case 'CAA': qtype = 257; break;
+    default: qtype = parseInt(recordType) || 1; // 如果是数字直接使用
+  }
+  
+  // 添加类型和类
+  message[offset++] = qtype >> 8;
+  message[offset++] = qtype & 0xff;
+  message[offset++] = 0; // IN类高字节
+  message[offset++] = 1; // IN类低字节
+  
+  return message;
+}
+
+// 将Uint8Array转为Base64URL编码
+function bufferToBase64Url(buffer) {
+  // 先转为标准Base64
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const base64 = btoa(binary);
+  
+  // 转为Base64URL（替换+为-，/为_，去掉末尾的=）
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function queryDNSServer(server, queryParams) {
+  const startTime = Date.now();
+  let hasEcs = false;
+  let ecsSource = 'none';
+  let serverSupportsEcsFlag = serverSupportsECS(server);
+  
+  try {
+    const serverUrl = new URL(server);
+    
+    // 复制URL查询参数
+    for (const param of queryParams.keys()) {
+      if (ALLOWED_PARAMS.includes(param)) {
+        serverUrl.searchParams.set(param, queryParams.get(param));
+      }
+    }
+    
+    // 添加ECS参数（如果有）
+    const ecs = queryParams.get(ECS_PARAM);
+    if (ecs && serverSupportsEcsFlag) {
+      addECStoURL(serverUrl, ecs);
+      hasEcs = true;
+      ecsSource = 'user';
+    } else if (queryParams.get(AUTO_ECS_PARAM) === 'true' && serverSupportsEcsFlag) {
+      // 获取客户端IP
+      const clientIP = getClientIP();
+      if (clientIP) {
+        addECStoURL(serverUrl, clientIP);
+        hasEcs = true;
+        ecsSource = 'auto';
+      }
+    }
+    
+    // 准备请求选项
+    const requestOptions = {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; CloudflareDNSProxy/1.0)',
+        'Accept': 'application/dns-message'
+      }
+    };
+    
+    // 如果是Cloudflare DNS服务，添加特定用户代理
+    if (server.includes('cloudflare-dns.com')) {
+      requestOptions.headers['User-Agent'] = 'curl/8.0.0';
+      requestOptions.headers['Accept'] = 'application/dns-message';
+      // 移除可能导致Cloudflare拒绝的头
+      delete requestOptions.headers['Accept-Language'];
+      delete requestOptions.headers['DNT'];
+    }
+    
+    // 如果是Google DNS服务，添加特定用户代理和请求头
+    if (server.includes('dns.google')) {
+      requestOptions.headers['User-Agent'] = 'curl/8.0.0';
+      requestOptions.headers['Accept'] = 'application/dns-message';
+      // 移除可能导致Google拒绝的头
+      delete requestOptions.headers['Accept-Language'];
+      delete requestOptions.headers['DNT'];
+      
+      // RFC 8484格式需要dns参数
+      if (!serverUrl.searchParams.has('dns')) {
+        // 检查是否有DNS查询基本参数
+        const name = queryParams.get('name');
+        const type = queryParams.get('type') || 'A'; // 默认为A记录
+        
+        if (name) {
+          // 构建基本的DNS查询消息
+          const dnsMessage = buildDNSMessage(name, type);
+          // 转换为base64url格式（不包含填充符）
+          const base64url = bufferToBase64Url(dnsMessage);
+          // 更新URL
+          serverUrl.search = `dns=${base64url}`;
+          console.log(`转换为RFC 8484格式: ${serverUrl.toString()}`);
+        }
+      }
+    }
+    
+    // 添加超时
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('DNS查询超时')), REQUEST_TIMEOUT);
+    });
+    
+    // 发起查询
+    const fetchPromise = fetch(serverUrl.toString(), requestOptions);
+    
+    // 竞争超时和正常查询
+    const response = await Promise.race([fetchPromise, timeoutPromise]);
+    const endTime = Date.now();
+    
+    // 验证响应是否有效
+    if (!response.ok) {
+      throw new Error(`DNS服务器响应错误: ${response.status} ${response.statusText}`);
+    }
+    
+    return { 
+      response, 
+      server, 
+      time: endTime - startTime,
+      hasEcs,
+      ecsSource,
+      serverSupportsEcs: serverSupportsEcsFlag
+    };
+  } catch (error) {
+    return { 
+      error: error.message, 
+      server, 
+      time: Date.now() - startTime 
+    };
+  }
 }
 
 export async function onRequest(context) {
@@ -333,364 +529,21 @@ export async function onRequest(context) {
 
     // 创建竞速函数，同时查询所有上游服务器，返回最快的响应
     async function queryWithRace(servers) {
-      // 记录开始时间，用于添加响应时间信息
-      const startTime = Date.now();
+      // 如果服务器数组为空，抛出错误
+      if (servers.length === 0) {
+        throw new Error('没有可用的DNS服务器');
+      }
       
-      // 如果只有一个服务器，直接查询不需要竞争
+      // 如果只有一个服务器，直接查询
       if (servers.length === 1) {
-        // 确保URL包含dns-query路径
-        let serverUrl;
-        try {
-          // 更智能地处理不同DNS服务器的URL格式
-          try {
-            if (servers[0].includes('/dns-query') || servers[0].includes('?dns=')) {
-              // 已经包含完整路径的情况
-              serverUrl = new URL(servers[0]);
-            } else if (servers[0].includes('?')) {
-              // 已经有查询参数但没有dns-query路径
-              try {
-                const encodedParams = encodeURIComponent(JSON.stringify(Object.fromEntries(queryParams.entries())));
-                serverUrl = new URL(servers[0] + '&dns=' + encodedParams);
-              } catch (encodeError) {
-                console.error('参数编码错误:', encodeError);
-                // 回退到简单的URL添加
-                serverUrl = new URL(servers[0]);
-              }
-            } else {
-              // 标准情况：添加dns-query路径
-              serverUrl = new URL(servers[0].endsWith('/') ? 
-                              servers[0] + 'dns-query' : 
-                              servers[0] + '/dns-query');
-            }
-            
-            // 仅当URL不包含'?dns='才添加查询参数
-            if (!servers[0].includes('?dns=')) {
-              serverUrl.search = queryParams.toString();
-            }
-          } catch (urlError) {
-            console.error(`构建URL出错, server="${servers[0]}":`, urlError);
-            // 尝试一种简单的回退方式
-            try {
-              serverUrl = new URL('https://' + servers[0].replace(/^(https?:\/\/)/, '') + '/dns-query');
-            } catch (fallbackError) {
-              throw new Error(`无法构建有效的DNS服务器URL: ${servers[0]}`);
-            }
-          }
-
-          // 对于不支持ECS的服务器，移除ECS参数
-          let serverSupportsEcsFlag = true;
-          if (hasEcs) {
-            // 尝试查找服务器在预设列表中的名称
-            const serverName = Object.keys(RESOLVER_SERVERS).find(
-              key => RESOLVER_SERVERS[key] === servers[0]
-            );
-            
-            if (serverName && !serverSupportsECS(serverName)) {
-              const nonEcsParams = new URLSearchParams(queryParams);
-              nonEcsParams.delete('edns_client_subnet');
-              serverUrl.search = nonEcsParams.toString();
-              serverSupportsEcsFlag = false;
-            }
-          }
-
-          console.log(`查询服务器: ${serverUrl.toString()}`);
-          
-          // 添加超时控制
-          const fetchPromise = fetch(serverUrl.toString(), requestOptions);
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('DNS查询超时')), 5000) // 5秒超时
-          );
-          
-          // 如果是Cloudflare DNS服务，添加特定用户代理
-          if (servers[0].includes('cloudflare-dns.com')) {
-            requestOptions.headers['User-Agent'] = 'curl/8.0.0';
-            requestOptions.headers['Accept'] = 'application/dns-json';
-            // 移除可能导致Cloudflare拒绝的头
-            delete requestOptions.headers['Accept-Language'];
-            delete requestOptions.headers['DNT'];
-          }
-          
-          // 如果是Google DNS的JSON API格式，需要特殊处理
-          let isGoogleJSON = false;
-          if (servers[0].includes('dns.google/resolve')) {
-            isGoogleJSON = true;
-            // 构建合适的URL格式
-            const googleParams = new URLSearchParams();
-            // 确保有name参数
-            const name = queryParams.get('name');
-            if (name) {
-              googleParams.set('name', name);
-            }
-            // 确保有type参数
-            const type = queryParams.get('type');
-            if (type) {
-              googleParams.set('type', type);
-            }
-            // 添加其他可能有用的参数
-            if (queryParams.get('do') === 'true') googleParams.set('do', '1');
-            if (queryParams.get('cd') === 'true') googleParams.set('cd', '1');
-            
-            // 使用新的参数替换URL中的搜索部分
-            serverUrl.search = googleParams.toString();
-            console.log(`特殊处理Google DNS JSON API: ${serverUrl.toString()}`);
-            
-            // 接受JSON格式
-            requestOptions.headers['Accept'] = 'application/json';
-          }
-          
-          // 竞争超时和正常查询
-          const response = await Promise.race([fetchPromise, timeoutPromise]);
-          const endTime = Date.now();
-          
-          // 验证响应是否有效
-          if (!response.ok) {
-            throw new Error(`DNS服务器响应错误: ${response.status} ${response.statusText}`);
-          }
-          
-          // 如果是Google JSON格式，需要转换为标准格式处理
-          if (isGoogleJSON) {
-            const jsonData = await response.json();
-            console.log(`接收到Google JSON响应: ${JSON.stringify(jsonData).substring(0, 200)}...`);
-            
-            // 创建新的Response对象，包含Google JSON数据
-            const transformedResponse = new Response(JSON.stringify(jsonData), {
-              status: response.status,
-              statusText: response.statusText,
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Original-Content-Type': response.headers.get('Content-Type') || 'application/json'
-              }
-            });
-            
-            return { 
-              response: transformedResponse, 
-              server: servers[0], 
-              time: endTime - startTime,
-              hasEcs,
-              ecsSource,
-              serverSupportsEcs: serverSupportsEcsFlag,
-              isGoogleJSON: true  // 标记为Google JSON格式
-            };
-          }
-          
-          return { 
-            response, 
-            server: servers[0], 
-            time: endTime - startTime,
-            hasEcs,
-            ecsSource,
-            serverSupportsEcs: serverSupportsEcsFlag
-          };
-        } catch (error) {
-          console.error(`解析或查询服务器URL出错: ${servers[0]}`, error);
-          throw error;
-        }
+        return queryDNSServer(servers[0], queryParams);
       }
       
       // 创建Promise数组，每个Promise对应一个上游服务器的查询
-      const promises = servers.map(async (server) => {
-        try {
-          // 确保URL包含dns-query路径
-          let serverUrl;
-          try {
-            if (server.includes('/dns-query') || server.includes('?dns=')) {
-              // 已经包含完整路径的情况
-              serverUrl = new URL(server);
-            } else if (server.includes('?')) {
-              // 已经有查询参数但没有dns-query路径
-              try {
-                const encodedParams = encodeURIComponent(JSON.stringify(Object.fromEntries(queryParams.entries())));
-                serverUrl = new URL(server + '&dns=' + encodedParams);
-              } catch (encodeError) {
-                console.error('参数编码错误:', encodeError);
-                // 回退到简单的URL添加
-                serverUrl = new URL(server);
-              }
-            } else {
-              // 标准情况：添加dns-query路径
-              serverUrl = new URL(server.endsWith('/') ? 
-                              server + 'dns-query' : 
-                              server + '/dns-query');
-            }
-            
-            // 仅当URL不包含'?dns='才添加查询参数
-            if (!server.includes('?dns=')) {
-              serverUrl.search = queryParams.toString();
-            }
-          } catch (urlError) {
-            console.error(`构建URL出错, server="${server}":`, urlError);
-            // 尝试一种简单的回退方式
-            try {
-              serverUrl = new URL('https://' + server.replace(/^(https?:\/\/)/, '') + '/dns-query');
-            } catch (fallbackError) {
-              throw new Error(`无法构建有效的DNS服务器URL: ${server}`);
-            }
-          }
-          
-          // 处理ECS参数，对于不支持ECS的服务器移除ECS参数
-          let serverSupportsEcsFlag = true;
-          if (hasEcs) {
-            // 尝试查找服务器在预设列表中的名称
-            const serverName = Object.keys(RESOLVER_SERVERS).find(
-              key => RESOLVER_SERVERS[key] === server
-            );
-            
-            if (serverName && !serverSupportsECS(serverName)) {
-              const nonEcsParams = new URLSearchParams(queryParams);
-              nonEcsParams.delete('edns_client_subnet');
-              serverUrl.search = nonEcsParams.toString();
-              serverSupportsEcsFlag = false;
-            } else {
-              serverUrl.search = queryParams.toString();
-            }
-          } else {
-            serverUrl.search = queryParams.toString();
-          }
-          
-          // 使用clone避免body已被读取的问题
-          const options = { ...requestOptions };
-          if (method === 'POST' && options.body) {
-            options.body = options.body.slice(0);
-          }
-          
-          console.log(`并行查询服务器: ${serverUrl.toString()}`);
-          
-          // 添加超时控制
-          const fetchPromise = fetch(serverUrl.toString(), options);
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('DNS查询超时')), 5000) // 5秒超时
-          );
-          
-          // 如果是Cloudflare DNS服务，添加特定用户代理
-          if (server.includes('cloudflare-dns.com')) {
-            options.headers['User-Agent'] = 'curl/8.0.0';
-            options.headers['Accept'] = 'application/dns-json';
-            // 移除可能导致Cloudflare拒绝的头
-            delete options.headers['Accept-Language'];
-            delete options.headers['DNT'];
-          }
-          
-          // 如果是Google DNS的JSON API格式，需要特殊处理
-          let isGoogleJSON = false;
-          if (server.includes('dns.google/resolve')) {
-            isGoogleJSON = true;
-            // 构建合适的URL格式
-            const googleParams = new URLSearchParams();
-            // 确保有name参数
-            const name = queryParams.get('name');
-            if (name) {
-              googleParams.set('name', name);
-            }
-            // 确保有type参数
-            const type = queryParams.get('type');
-            if (type) {
-              googleParams.set('type', type);
-            }
-            // 添加其他可能有用的参数
-            if (queryParams.get('do') === 'true') googleParams.set('do', '1');
-            if (queryParams.get('cd') === 'true') googleParams.set('cd', '1');
-            
-            // 使用新的参数替换URL中的搜索部分
-            serverUrl.search = googleParams.toString();
-            console.log(`特殊处理Google DNS JSON API: ${serverUrl.toString()}`);
-            
-            // 接受JSON格式
-            options.headers['Accept'] = 'application/json';
-          }
-          
-          // 竞争超时和正常查询
-          const response = await Promise.race([fetchPromise, timeoutPromise]);
-          const endTime = Date.now();
-          
-          // 验证响应是否有效
-          if (!response.ok) {
-            throw new Error(`DNS服务器响应错误: ${response.status} ${response.statusText}`);
-          }
-          
-          // 如果是Google JSON格式，需要转换为标准格式处理
-          if (isGoogleJSON) {
-            const jsonData = await response.json();
-            console.log(`接收到Google JSON响应: ${JSON.stringify(jsonData).substring(0, 200)}...`);
-            
-            // 创建新的Response对象，包含Google JSON数据
-            const transformedResponse = new Response(JSON.stringify(jsonData), {
-              status: response.status,
-              statusText: response.statusText,
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Original-Content-Type': response.headers.get('Content-Type') || 'application/json'
-              }
-            });
-            
-            return { 
-              response: transformedResponse, 
-              server: server, 
-              time: endTime - startTime,
-              hasEcs,
-              ecsSource,
-              serverSupportsEcs: serverSupportsEcsFlag,
-              isGoogleJSON: true  // 标记为Google JSON格式
-            };
-          }
-          
-          return { 
-            response, 
-            server, 
-            time: endTime - startTime,
-            hasEcs,
-            ecsSource,
-            serverSupportsEcs: serverSupportsEcsFlag
-          };
-        } catch (error) {
-          console.error(`查询${server}失败:`, error);
-          // 添加更详细的错误日志
-          console.error(`详细错误信息: ${error.message}`);
-          console.error(`服务器: ${server}`);
-          try {
-            console.error(`请求URL: ${serverUrl.toString()}`);
-          } catch (e) {
-            console.error(`无法获取URL字符串: ${e.message}`);
-          }
-          try {
-            console.error(`请求参数: ${JSON.stringify(options)}`);
-          } catch (e) {
-            console.error(`无法序列化请求参数: ${e.message}`);
-          }
-          
-          // 返回一个错误响应，但不中断竞争
-          return { 
-            error: true, 
-            server, 
-            time: Date.now() - startTime,
-            message: error.message,
-            detail: `查询${server}失败: ${error.message}`
-          };
-        }
-      });
+      const promises = servers.map(server => queryDNSServer(server, queryParams));
       
-      // 使用Promise.race等待最快的响应
-      return Promise.race(promises).then(result => {
-        // 确保至少有一个有效响应，否则返回一个有明确错误消息的对象
-        if (result && !result.error) {
-          return result;
-        }
-        
-        // 尝试找到一个有效的响应
-        return Promise.all(promises).then(results => {
-          const validResult = results.find(r => r && !r.error);
-          if (validResult) {
-            return validResult;
-          }
-          
-          // 所有响应都出错，返回第一个错误
-          return result || {
-            error: true,
-            server: '未知',
-            time: Date.now() - startTime,
-            message: '所有DNS服务器均无响应或响应错误'
-          };
-        });
-      });
+      // 使用Promise.race获取最快的响应
+      return Promise.race(promises);
     }
 
     // 执行并行查询
@@ -715,82 +568,43 @@ export async function onRequest(context) {
               'Cache-Control': 'public, max-age=60',
               'X-DNS-Upstream': retryResult.server,
               'X-DNS-Response-Time': `${retryResult.time}ms`,
-              'X-DNS-Retried': 'true',
-              ...(retryResult.hasEcs ? {
-                'X-EDNS-Client-Subnet': queryParams.get('edns_client_subnet'),
-                'X-EDNS-Client-Subnet-Used': retryResult.serverSupportsEcs ? 'true' : 'false',
-                'X-EDNS-Client-Subnet-Source': retryResult.ecsSource
-              } : {})
+              'X-DNS-ECS-Status': retryResult.hasEcs ? `Added (${retryResult.ecsSource})` : 'Not added',
+              'X-DNS-Debug': 'If you see this, your request was successfully processed',
+              'Content-Type': retryResult.response.headers.get('Content-Type') || 'application/dns-message'
             })
           });
         }
       }
       
-      // 所有服务器都失败，抛出错误
-      throw new Error(`所有上游服务器查询失败，最初错误：${result.message}`);
-    }
-
-    // 特殊处理Google JSON响应
-    if (result.isGoogleJSON) {
-      const contentType = 'application/json';
-      const responseHeaders = new Headers({
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST',
-        'Cache-Control': 'public, max-age=60',
-        'Content-Type': contentType,
-        'X-DNS-Upstream': result.server,
-        'X-DNS-Response-Time': `${result.time}ms`,
-        'X-DNS-Format': 'Google-JSON'
-      });
-      
-      if (result.hasEcs) {
-        const ecsParamValue = queryParams.get('edns_client_subnet');
-        responseHeaders.set('X-EDNS-Client-Subnet', ecsParamValue);
-        responseHeaders.set('X-EDNS-Client-Subnet-Used', result.serverSupportsEcs ? 'true' : 'false');
-        responseHeaders.set('X-EDNS-Client-Subnet-Source', result.ecsSource);
-      }
-      
-      return new Response(result.response.body, {
-        status: result.response.status,
-        statusText: result.response.statusText,
-        headers: responseHeaders
+      // 所有服务器都失败，返回错误
+      return new Response(JSON.stringify({
+        error: 'All DNS servers failed',
+        details: result.error
+      }), {
+        status: 502,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache, no-store',
+          'X-DNS-Debug': 'If you see this, all DNS servers have failed'
+        }
       });
     }
 
-    // 准备返回的Response对象
-    const responseHeaders = new Headers({
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST',
-      'Cache-Control': 'public, max-age=60',
-      // 添加自定义响应头，包含响应来源和响应时间
-      'X-DNS-Upstream': result.server,
-      'X-DNS-Response-Time': `${result.time}ms`,
-      'X-DNS-Debug': 'If you see this, your request was successfully processed',
-      'X-DNS-Query-Params': url.searchParams.toString(),
-    });
-    
-    // 如果使用了ECS，添加到响应头
-    if (result.hasEcs) {
-      const ecsParamValue = queryParams.get('edns_client_subnet');
-      responseHeaders.set('X-EDNS-Client-Subnet', ecsParamValue);
-      responseHeaders.set('X-EDNS-Client-Subnet-Used', result.serverSupportsEcs ? 'true' : 'false');
-      responseHeaders.set('X-EDNS-Client-Subnet-Source', result.ecsSource);
-    }
-
-    // 复制响应的内容类型
-    const contentType = result.response.headers.get('content-type');
-    if (contentType) {
-      responseHeaders.set('content-type', contentType);
-    } else {
-      // 如果上游没有提供content-type，使用默认的application/dns-json
-      responseHeaders.set('content-type', 'application/dns-json');
-    }
-
-    // 返回最快上游服务器的响应
+    // 返回最快的有效响应
     return new Response(result.response.body, {
       status: result.response.status,
       statusText: result.response.statusText,
-      headers: responseHeaders,
+      headers: new Headers({
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST',
+        'Cache-Control': 'public, max-age=60',
+        'X-DNS-Upstream': result.server,
+        'X-DNS-Response-Time': `${result.time}ms`,
+        'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
+        'X-DNS-Debug': 'If you see this, your request was successfully processed',
+        'Content-Type': result.response.headers.get('Content-Type') || 'application/dns-message'
+      })
     });
   } catch (error) {
     console.error('处理DNS解析请求时出错:', error);

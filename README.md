@@ -280,9 +280,6 @@ cf-dns-pages/
      "aliyun": "https://dns.alidns.com/dns-query",
      "dnspod": "https://doh.pub/dns-query",
      "adguard": "https://dns.adguard.com/dns-query",
-     "quad9": "https://dns.quad9.net/dns-query",
-     "opendns": "https://doh.opendns.com/dns-query",
-     "nextdns": "https://dns.nextdns.io",
      "your-custom": "https://your-custom-doh-server.com/dns-query" // 添加您的自定义服务器
    };
    
@@ -457,8 +454,5 @@ A: 直接在查询中使用`type=AAAA`参数，例如：`/api/resolver?name=exam
 | 阿里云DNS | https://dns.alidns.com/dns-query | ✅ 支持 |
 | DNSPod | https://doh.pub/dns-query | ✅ 支持 |
 | AdGuard DNS | https://dns.adguard.com/dns-query | ✅ 支持 |
-| Quad9 | https://dns.quad9.net/dns-query | ✅ 支持 |
-| OpenDNS | https://doh.opendns.com/dns-query | ✅ 支持 |
-| NextDNS | https://dns.nextdns.io | ✅ 支持 |
 
 默认情况下，系统会并行查询Cloudflare和Google两个服务器，并返回最快的响应结果。

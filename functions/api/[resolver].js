@@ -412,8 +412,8 @@ function extractIPsFromDNSResponse(buffer, recordType = 'ANY') {
       offset += 2;
       
       // 检查记录类型是否匹配
-      const isTypeA = (type === 1 && recordType.toUpperCase() === 'A');
-      const isTypeAAAA = (type === 28 && recordType.toUpperCase() === 'AAAA');
+      const isTypeA = (type === 1 && (recordType.toUpperCase() === 'A' || recordType.toUpperCase() === 'ANY'));
+      const isTypeAAAA = (type === 28 && (recordType.toUpperCase() === 'AAAA' || recordType.toUpperCase() === 'ANY'));
       
       if (isTypeA) {
         // A记录（IPv4地址）

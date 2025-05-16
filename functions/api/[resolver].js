@@ -180,7 +180,7 @@ function buildDNSMessage(domainName, recordType) {
   message[offset++] = 0;
   
   // 确定记录类型
-  let qtype = 255; // 默认为ANY记录，查询所有类型
+  let qtype = 1; // 默认为A记录，因为ANY可能不被所有服务器支持
   switch (recordType.toUpperCase()) {
     case 'A': qtype = 1; break;
     case 'AAAA': qtype = 28; break;
@@ -192,7 +192,7 @@ function buildDNSMessage(domainName, recordType) {
     case 'SRV': qtype = 33; break;
     case 'PTR': qtype = 12; break;
     case 'CAA': qtype = 257; break;
-    case 'ANY': qtype = 255; break; // ANY查询所有记录类型
+    case 'ANY': qtype = 1; break; // ANY查询改为使用A记录类型，避免兼容性问题
     default: qtype = parseInt(recordType) || 1; // 如果是数字直接使用
   }
   
@@ -275,8 +275,11 @@ async function queryDNSServer(server, queryParams, request) {
     const type = queryParams.get('type') || 'ANY';
     
     if (name) {
+      // 如果是ANY类型查询，实际构建A类型的DNS查询消息，提高兼容性
+      const queryType = type.toUpperCase() === 'ANY' ? 'A' : type;
+      
       // 构建基本的DNS查询消息
-      const dnsMessage = buildDNSMessage(name, type);
+      const dnsMessage = buildDNSMessage(name, queryType);
       // 转换为base64url格式（不包含填充符）
       const base64url = bufferToBase64Url(dnsMessage);
       // 更新URL
@@ -969,7 +972,31 @@ export async function onRequest(context) {
         const dnsResponseBody = await result.response.arrayBuffer();
         
         // 始终显示所有类型记录
-        const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
+        let recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
+        
+        // 如果是ANY类型查询且返回的记录为空，尝试使用A类型查询作为后备
+        if ((queryParams.get('type') || 'ANY').toUpperCase() === 'ANY' && 
+            Object.keys(recordTypes).length === 0) {
+          
+          console.log("ANY类型查询返回空结果，尝试A记录查询");
+          
+          // 创建A类型的查询参数
+          const aQueryParams = new URLSearchParams(queryParams);
+          aQueryParams.set('type', 'A');
+          
+          // 尝试查询A记录
+          const aResult = await queryWithRetry(result.server, aQueryParams, request);
+          
+          if (!aResult.error && aResult.response) {
+            const aResponseBody = await aResult.response.arrayBuffer();
+            const aRecords = extractAllRecordsFromDNSResponse(aResponseBody);
+            
+            // 如果A记录查询返回结果，使用它
+            if (Object.keys(aRecords).length > 0) {
+              recordTypes = aRecords;
+            }
+          }
+        }
         
         // 构建响应输出
         const allTypesOutput = {

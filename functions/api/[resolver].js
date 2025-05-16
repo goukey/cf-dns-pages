@@ -46,13 +46,7 @@ const RESOLVER_SERVERS = {
   "google": "https://dns.google/dns-query",
   "aliyun": "https://dns.alidns.com/dns-query",
   "dnspod": "https://doh.pub/dns-query",
-  "adguard": "https://dns.adguard.com/dns-query",
-  "quad9": "https://dns.quad9.net/dns-query",
-  "opendns": "https://doh.opendns.com/dns-query",
-  "nextdns": "https://dns.nextdns.io",
-  "twnic": "https://dns.twnic.tw/dns-query",
-  "360dns": "https://doh.360.cn/dns-query",
-  "rubyfish": "https://dns.rubyfish.cn/dns-query"
+  "adguard": "https://dns.adguard.com/dns-query"
 };
 
 // 预设服务器是否支持ECS
@@ -62,13 +56,7 @@ const ECS_SUPPORT = {
   "google": true,      // Google支持ECS
   "aliyun": true,      // 阿里云DNS支持ECS
   "dnspod": true,      // DNSPod支持ECS
-  "adguard": true,     // AdGuard DNS支持ECS
-  "quad9": true,       // Quad9支持ECS
-  "opendns": true,     // OpenDNS支持ECS
-  "nextdns": true,     // NextDNS支持ECS
-  "twnic": false,      // TWNIC不确定是否支持ECS
-  "360dns": true,      // 360DNS支持ECS
-  "rubyfish": true     // 红鱼DNS支持ECS
+  "adguard": true      // AdGuard DNS支持ECS
 };
 
 // 获取上游服务器配置

@@ -971,15 +971,36 @@ export async function onRequest(context) {
         // 始终显示所有类型记录
         let recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
         
-        // 如果是ANY类型查询且返回的记录为空，尝试查询多种常见记录类型
-        if ((queryParams.get('type') || 'ANY').toUpperCase() === 'ANY' && 
-            Object.keys(recordTypes).length === 0) {
+        // RFC8482检测 - 判断是否收到了RFC8482响应（禁用ANY查询的响应）
+        const isRFC8482Response = (records) => {
+          // 检查是否有PTR记录并且值包含RFC8482
+          if (records.PTR && records.PTR.length === 1) {
+            const ptrValue = records.PTR[0].value;
+            return typeof ptrValue === 'string' && ptrValue.includes('RFC8482');
+          }
           
-          console.log("ANY类型查询返回空结果，尝试查询多种记录类型");
+          // 检查返回的记录总数，可能表明是RFC8482响应
+          // ANY请求通常应该返回多个记录类型
+          const totalTypes = Object.keys(records).length;
+          if (totalTypes === 1 && records.hasOwnProperty('PTR')) {
+            return true;
+          }
+          
+          return false;
+        };
+        
+        // 如果是ANY类型查询且返回的记录为空或收到RFC8482响应，尝试查询多种常见记录类型
+        if ((queryParams.get('type') || 'ANY').toUpperCase() === 'ANY' && 
+            (Object.keys(recordTypes).length === 0 || isRFC8482Response(recordTypes))) {
+          
+          console.log("ANY类型查询返回空结果或RFC8482响应，尝试查询多种记录类型");
           
           // 要查询的常见DNS记录类型
-          const recordTypesToQuery = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS'];
+          const recordTypesToQuery = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA'];
           let combinedRecords = {};
+          
+          // 检测是否遇到了RFC8482响应
+          const metRFC8482 = isRFC8482Response(recordTypes);
           
           // 为每种类型创建新的查询
           for (const recType of recordTypesToQuery) {
@@ -994,13 +1015,32 @@ export async function onRequest(context) {
               const typeRecords = extractAllRecordsFromDNSResponse(typeResponseBody);
               
               // 合并结果
-              Object.assign(combinedRecords, typeRecords);
+              for (const [type, records] of Object.entries(typeRecords)) {
+                if (!combinedRecords[type]) {
+                  combinedRecords[type] = records;
+                } else {
+                  combinedRecords[type] = [...combinedRecords[type], ...records];
+                }
+              }
             }
           }
           
           // 如果合并后有结果，使用合并的结果
           if (Object.keys(combinedRecords).length > 0) {
             recordTypes = combinedRecords;
+          }
+          
+          // 如果检测到RFC8482响应，添加说明并移除PTR记录
+          if (metRFC8482) {
+            // 移除RFC8482的PTR记录
+            delete recordTypes.PTR;
+            
+            // 添加提示信息到响应
+            recordTypes.NOTE = [{ 
+              name: domainName, 
+              value: "上游DNS服务器不支持ANY查询(遵循RFC8482)，已自动查询各类型记录", 
+              ttl: 60 
+            }];
           }
         }
         

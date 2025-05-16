@@ -168,6 +168,9 @@
               <li class="nav-item">
                 <a class="nav-link" id="tab-usage" href="#usage" data-bs-toggle="tab">使用方法</a>
               </li>
+              <li class="nav-item">
+                <a class="nav-link" id="tab-stats" href="#stats" data-bs-toggle="tab">服务器统计</a>
+              </li>
             </ul>
           </div>
           <div class="card-body">
@@ -223,7 +226,7 @@
                 </ul>
                 
                 <h5>示例</h5>
-                <p>基本查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A</code><br><small class="text-muted">默认并行查询Cloudflare和DNSPod，返回最快结果</small></p>
+                <p>基本查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A</code><br><small class="text-muted">默认并行查询Cloudflare和Google，返回最快结果</small></p>
                 <p>IPv6地址查询：<br><code>https://[你的域名]/api/resolver?name=example.com&type=AAAA</code></p>
                 <p>单一服务器模式：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&single=true</code></p>
                 <p>指定节点：<br><code>https://[你的域名]/api/resolver?name=example.com&type=A&server=dnspod</code></p>
@@ -255,10 +258,10 @@
                 <input type="text" class="form-control" id="domain" placeholder="例如: example.com" value="example.com">
               </div>
               
-              <div class="mb-3">
+                              <div class="mb-3">
                 <label for="record-type" class="form-label">记录类型</label>
                 <select class="form-select" id="record-type">
-                  <option value="">所有类型（默认）</option>
+                  <option value="ANY">所有类型（默认）</option>
                   <option value="A">A - IPv4地址</option>
                   <option value="AAAA">AAAA - IPv6地址</option>
                   <option value="CNAME">CNAME - 规范名称</option>
@@ -267,7 +270,7 @@
                   <option value="NS">NS - 名称服务器</option>
                   <option value="SOA">SOA - 权威记录</option>
                 </select>
-                <div class="form-text">不选择类型将返回所有可用类型的记录</div>
+                <div class="form-text">默认查询所有可用类型的记录，部分DNS服务器可能不支持</div>
               </div>
               
               <div class="mb-3">

@@ -31,6 +31,13 @@ const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google"];
 // DNS查询超时时间（毫秒）
 const REQUEST_TIMEOUT = 5000;
 
+// 增加重试配置
+const RETRY_CONFIG = {
+  maxRetries: 2,           // 最大重试次数
+  initialBackoff: 200,     // 初始重试间隔（毫秒）
+  backoffMultiplier: 1.5   // 重试间隔乘数
+};
+
 // 预设上游服务器
 // 如需添加自己的预设服务器，请在此处添加条目
 // 格式: "服务器名称": "完整的DoH服务器URL"
@@ -39,7 +46,13 @@ const RESOLVER_SERVERS = {
   "google": "https://dns.google/dns-query",
   "aliyun": "https://dns.alidns.com/dns-query",
   "dnspod": "https://doh.pub/dns-query",
-  "adguard": "https://dns.adguard.com/dns-query"
+  "adguard": "https://dns.adguard.com/dns-query",
+  "quad9": "https://dns.quad9.net/dns-query",
+  "opendns": "https://doh.opendns.com/dns-query",
+  "nextdns": "https://dns.nextdns.io",
+  "twnic": "https://dns.twnic.tw/dns-query",
+  "360dns": "https://doh.360.cn/dns-query",
+  "rubyfish": "https://dns.rubyfish.cn/dns-query"
 };
 
 // 预设服务器是否支持ECS
@@ -49,7 +62,13 @@ const ECS_SUPPORT = {
   "google": true,      // Google支持ECS
   "aliyun": true,      // 阿里云DNS支持ECS
   "dnspod": true,      // DNSPod支持ECS
-  "adguard": true      // AdGuard DNS支持ECS
+  "adguard": true,     // AdGuard DNS支持ECS
+  "quad9": true,       // Quad9支持ECS
+  "opendns": true,     // OpenDNS支持ECS
+  "nextdns": true,     // NextDNS支持ECS
+  "twnic": false,      // TWNIC不确定是否支持ECS
+  "360dns": true,      // 360DNS支持ECS
+  "rubyfish": true     // 红鱼DNS支持ECS
 };
 
 // 获取上游服务器配置
@@ -173,7 +192,7 @@ function buildDNSMessage(domainName, recordType) {
   message[offset++] = 0;
   
   // 确定记录类型
-  let qtype = 1; // 默认为A记录
+  let qtype = 255; // 默认为ANY记录，查询所有类型
   switch (recordType.toUpperCase()) {
     case 'A': qtype = 1; break;
     case 'AAAA': qtype = 28; break;
@@ -185,6 +204,7 @@ function buildDNSMessage(domainName, recordType) {
     case 'SRV': qtype = 33; break;
     case 'PTR': qtype = 12; break;
     case 'CAA': qtype = 257; break;
+    case 'ANY': qtype = 255; break; // ANY查询所有记录类型
     default: qtype = parseInt(recordType) || 1; // 如果是数字直接使用
   }
   
@@ -262,7 +282,9 @@ async function queryDNSServer(server, queryParams, request) {
     // RFC 8484格式需要dns参数
     // 检查是否有DNS查询基本参数
     const name = queryParams.get('name');
-    const type = queryParams.get('type') || 'A'; // 默认为A记录
+    // 如果没有指定类型，使用特殊的ANY类型(255)查询所有记录类型
+    // 注意：部分DNS服务器可能不支持ANY查询
+    const type = queryParams.get('type') || 'ANY';
     
     if (name) {
       // 构建基本的DNS查询消息
@@ -332,7 +354,7 @@ async function queryDNSServer(server, queryParams, request) {
 }
 
 // 从DNS响应中提取IP地址
-function extractIPsFromDNSResponse(buffer, recordType = 'A') {
+function extractIPsFromDNSResponse(buffer, recordType = 'ANY') {
   try {
     // 创建数据视图
     const view = new DataView(buffer);
@@ -850,6 +872,35 @@ export async function onRequest(context) {
       requestOptions.body = body;
     }
 
+    // 添加带重试逻辑的查询函数
+    async function queryWithRetry(server, params, req, retryCount = 0) {
+      try {
+        return await queryDNSServer(server, params, req);
+      } catch (error) {
+        if (retryCount < RETRY_CONFIG.maxRetries) {
+          // 计算退避时间
+          const backoffTime = RETRY_CONFIG.initialBackoff * Math.pow(RETRY_CONFIG.backoffMultiplier, retryCount);
+          
+          // 等待一段时间后重试
+          await new Promise(resolve => setTimeout(resolve, backoffTime));
+          
+          // 记录重试日志
+          console.log(`[重试 ${retryCount + 1}/${RETRY_CONFIG.maxRetries}] 重试服务器 ${server}`);
+          
+          // 递归重试
+          return queryWithRetry(server, params, req, retryCount + 1);
+        }
+        
+        // 达到最大重试次数，返回带有重试信息的错误
+        return {
+          error: error.message,
+          server: server,
+          retried: retryCount,
+          maxRetries: RETRY_CONFIG.maxRetries
+        };
+      }
+    }
+
     // 创建竞速函数，同时查询所有上游服务器，返回最快的响应
     async function queryWithRace(servers, req) {
       // 如果服务器数组为空，抛出错误
@@ -857,13 +908,13 @@ export async function onRequest(context) {
         throw new Error('没有可用的DNS服务器');
       }
       
-      // 如果只有一个服务器，直接查询
+      // 如果只有一个服务器，使用带重试的查询
       if (servers.length === 1) {
-        return queryDNSServer(servers[0], queryParams, req);
+        return queryWithRetry(servers[0], queryParams, req);
       }
       
       // 创建Promise数组，每个Promise对应一个上游服务器的查询
-      const promises = servers.map(server => queryDNSServer(server, queryParams, req));
+      const promises = servers.map(server => queryWithRetry(server, queryParams, req));
       
       // 使用Promise.race获取最快的响应
       return Promise.race(promises);
@@ -882,19 +933,26 @@ export async function onRequest(context) {
         const retryResult = await queryWithRace(remainingServers, request);
         if (!retryResult.error) {
           // 找到有效响应，使用它
+          const responseHeaders = new Headers({
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST',
+            'Cache-Control': 'public, max-age=60',
+            'X-DNS-Upstream': retryResult.server,
+            'X-DNS-Response-Time': `${retryResult.time}ms`,
+            'X-DNS-ECS-Status': retryResult.hasEcs ? `Added (${retryResult.ecsSource})` : 'Not added',
+            'X-DNS-Debug': 'If you see this, your request was successfully processed',
+            'Content-Type': retryResult.response.headers.get('Content-Type') || 'application/dns-message'
+          });
+          
+          // 如果经过重试，添加重试信息
+          if (retryResult.retried > 0) {
+            responseHeaders.set('X-DNS-Retried', `${retryResult.retried} times`);
+          }
+          
           return new Response(retryResult.response.body, {
             status: retryResult.response.status,
             statusText: retryResult.response.statusText,
-            headers: new Headers({
-              'Access-Control-Allow-Origin': '*',
-              'Access-Control-Allow-Methods': 'GET, POST',
-              'Cache-Control': 'public, max-age=60',
-              'X-DNS-Upstream': retryResult.server,
-              'X-DNS-Response-Time': `${retryResult.time}ms`,
-              'X-DNS-ECS-Status': retryResult.hasEcs ? `Added (${retryResult.ecsSource})` : 'Not added',
-              'X-DNS-Debug': 'If you see this, your request was successfully processed',
-              'Content-Type': retryResult.response.headers.get('Content-Type') || 'application/dns-message'
-            })
+            headers: responseHeaders
           });
         }
       }
@@ -1022,7 +1080,7 @@ export async function onRequest(context) {
     }), { 
       status: 502, // 使用502 Bad Gateway更合适
       headers: {
-        'Content-Type': 'application/json;charset=UTF-8',
+        'Content-Type': 'application/json; charset=utf-8',
         'Access-Control-Allow-Origin': '*',
         'X-Error-Source': 'DNS-Resolver',
         'X-Error-Type': 'Upstream failure'

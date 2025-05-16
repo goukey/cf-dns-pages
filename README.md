@@ -4,19 +4,21 @@
 
 ## 功能特点
 
-- **智能解析**：将请求分发到全球多个高速节点（Cloudflare, Google, 阿里云等）
+- **智能解析**：将请求分发到全球多个高速节点（Cloudflare, Google等）
 - **多节点支持**：支持在请求中动态指定上游解析节点
 - **并行查询**：同时查询多个上游服务器，返回最快的结果
 - **自动ECS**：智能识别客户端IP并自动设置适当的客户端子网
 - **ECS支持**：支持EDNS Client Subnet，获取更精准的地理位置解析结果
 - **自定义上游**：支持用户自定义任意HTTPS的DNS解析服务器
+- **错误重试**：自动对失败查询进行指数退避重试，提高可靠性
 - **兼容标准**：完全兼容标准的DNS解析协议
 - **低延迟**：利用Cloudflare的全球边缘网络，提供低延迟的DNS解析服务
 - **无服务器**：完全基于Cloudflare Pages构建，无需维护服务器
 - **简单部署**：可直接通过GitHub一键部署到Cloudflare Pages
 - **IPv6支持**：完全支持IPv6地址解析和AAAA记录查询
-- **默认并行查询**：默认情况下自动查询多个上游服务器，获取最快响应
-- **全类型记录查询**：默认返回域名的所有类型DNS记录，无需额外配置
+- **默认并行查询**：默认情况下自动查询Cloudflare和Google两个上游服务器，获取最快响应
+- **全类型记录查询**：默认返回域名的所有类型DNS记录，支持ANY查询类型
+
 
 ## 部署指南
 
@@ -52,17 +54,21 @@
 
 ### API端点
 
-服务主要提供一个API端点：`/api/resolver`
+服务提供以下API端点：
+- `/api/resolver` - DNS解析API端点
 
 ### 查询示例
 
 ```
 # 基本查询（默认返回所有类型的DNS记录）
 https://[your-domain]/api/resolver?name=example.com
-# （默认会自动并行查询多个上游服务器，返回最快的结果）
+# （默认会自动并行查询Cloudflare和Google两个上游服务器，返回最快的结果）
 
 # 只查询特定类型的记录
 https://[your-domain]/api/resolver?name=example.com&type=A
+
+# 使用ANY查询所有类型记录
+https://[your-domain]/api/resolver?name=example.com&type=ANY
 
 # IPv6地址查询
 https://[your-domain]/api/resolver?name=example.com&type=AAAA
@@ -78,6 +84,8 @@ https://[your-domain]/api/resolver?name=example.com&server=cloudflare,google,ali
 
 # 使用所有预设节点进行并行查询
 https://[your-domain]/api/resolver?name=example.com&parallel=true
+
+
 
 # 启用自动ECS (默认已启用)
 https://[your-domain]/api/resolver?name=example.com&auto_ecs=true
@@ -138,7 +146,7 @@ cf-dns-pages/
 
 ### 使用方法
 
-1. **默认方式**：无需任何参数，默认会同时查询 Cloudflare、Google、阿里云、DNSPod 和 AdGuard 等上游服务器
+1. **默认方式**：无需任何参数，默认会同时查询Cloudflare和Google两个上游服务器
    ```
    /api/resolver?name=example.com
    ```
@@ -272,6 +280,9 @@ cf-dns-pages/
      "aliyun": "https://dns.alidns.com/dns-query",
      "dnspod": "https://doh.pub/dns-query",
      "adguard": "https://dns.adguard.com/dns-query",
+     "quad9": "https://dns.quad9.net/dns-query",
+     "opendns": "https://doh.opendns.com/dns-query",
+     "nextdns": "https://dns.nextdns.io",
      "your-custom": "https://your-custom-doh-server.com/dns-query" // 添加您的自定义服务器
    };
    
@@ -290,7 +301,7 @@ cf-dns-pages/
 
    ```js
    // 默认并行查询的服务器列表
-   const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google", "aliyun", "dnspod", "adguard"];
+   const DEFAULT_PARALLEL_SERVERS = ["cloudflare", "google"];
    ```
 
 4. **更新前端界面**：在`index.html`文件中添加新服务器的选项：
@@ -446,5 +457,8 @@ A: 直接在查询中使用`type=AAAA`参数，例如：`/api/resolver?name=exam
 | 阿里云DNS | https://dns.alidns.com/dns-query | ✅ 支持 |
 | DNSPod | https://doh.pub/dns-query | ✅ 支持 |
 | AdGuard DNS | https://dns.adguard.com/dns-query | ✅ 支持 |
+| Quad9 | https://dns.quad9.net/dns-query | ✅ 支持 |
+| OpenDNS | https://doh.opendns.com/dns-query | ✅ 支持 |
+| NextDNS | https://dns.nextdns.io | ✅ 支持 |
 
-默认情况下，系统会并行查询上述服务器，并返回最快的响应结果。
+默认情况下，系统会并行查询Cloudflare和Google两个服务器，并返回最快的响应结果。

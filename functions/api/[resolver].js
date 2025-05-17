@@ -1457,37 +1457,46 @@ export async function onRequest(context) {
                                result.server.includes('dns.google');
     
     // ANY查询特殊处理 - 检查是否需要对各记录类型单独查询
+    // 对于任何非Cloudflare服务器，始终重新查询，避免原始DNS响应处理错误
+    if (result.server !== "https://cloudflare-dns.com/dns-query") {
+      needRequery = true;
+    }
+    
+    // 处理ANY查询或特殊格式响应
     if (isAnyQuery || isGoogleJsonResponse) {
       try {
-        // 首先尝试解析DNS响应
-        const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
-        const metRFC8482 = isRFC8482Response(recordTypes);
-        const emptyResponse = !recordTypes || Object.keys(recordTypes).length === 0 || 
-          (Object.keys(recordTypes).length === 1 && recordTypes.NOTE);
+        console.log(`处理ANY查询或特殊格式响应 (服务器: ${result.server})`);
         
-        // 检查RCODE - 确保dnsResponseBody有效
-        let rcode = 0;
-        let isNXDomain = false;
-        
-        try {
-          if (dnsResponseBody && dnsResponseBody.byteLength >= 4) {
-            rcode = new DataView(dnsResponseBody).getUint16(2) & 0x000F;
-            isNXDomain = rcode === 3 || rcode === 4;
+        // 如果是Cloudflare，尝试检查其响应
+        if (result.server === "https://cloudflare-dns.com/dns-query") {
+          try {
+            // 尝试解析DNS响应
+            if (dnsResponseBody && dnsResponseBody.byteLength > 0) {
+              const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
+              const metRFC8482 = isRFC8482Response(recordTypes);
+              const emptyResponse = !recordTypes || Object.keys(recordTypes).length === 0 || 
+                (Object.keys(recordTypes).length === 1 && recordTypes.NOTE);
+                
+              // 检查RCODE
+              let rcode = 0;
+              if (dnsResponseBody.byteLength >= 4) {
+                rcode = new DataView(dnsResponseBody).getUint16(2) & 0x000F;
+                const isNXDomain = rcode === 3 || rcode === 4;
+                
+                // 只有在特定条件下才重新查询
+                if (emptyResponse || metRFC8482 || isNXDomain) {
+                  console.log(`Cloudflare ANY查询返回特殊响应 (rcode=${rcode})，尝试查询多种记录类型`);
+                  needRequery = true;
+                }
+              }
+            }
+          } catch (parseError) {
+            console.error('解析Cloudflare DNS响应时出错:', parseError);
+            needRequery = true;
           }
-        } catch (e) {
-          console.error('检查RCODE时出错:', e);
-        }
-        
-        // 对于Google JSON响应，总是需要重新查询
-        if (isGoogleJsonResponse) {
-          console.log(`检测到Google JSON响应，将自动查询各记录类型`);
-          needRequery = true;
-        }
-        
-        // 如果ANY查询无结果或被拒绝，尝试单独查询各类型记录
-        if (emptyResponse || metRFC8482 || isNXDomain) {
-          console.log(`ANY查询返回空结果或RFC8482响应或NXDOMAIN (rcode=${rcode})，尝试查询多种记录类型`);
-          needRequery = true;
+        } else {
+          // 非Cloudflare服务器，打印调试信息
+          console.log(`非Cloudflare服务器(${result.server})，将自动查询各类型记录`);
           
           // 要查询的常见DNS记录类型
           const recordTypesToQuery = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA'];
@@ -1668,18 +1677,13 @@ export async function onRequest(context) {
       }
     }
     
-    // 返回最快的有效响应（原始模式）
-    // 永远保持原始格式，以支持第三方DNS客户端如AdGuard Home等
-    // 保留原始响应的Content-Type和body
-    const contentType = result.response.headers.get('Content-Type') || 'application/dns-message';
+    // 根据服务器和查询结果选择最合适的响应格式
     
-    // 确认是否为Google的JSON响应格式，需要特殊处理
-    // (已在上方声明isGoogleJsonResponse变量)
-    
-    // 如果是Google的JSON响应，使用通用DNS消息格式包装
-    if (isGoogleJsonResponse && needRequery && requeriedRecords) {
+    // 1. 如果重新查询成功，无论是什么服务器，都使用标准DNS消息格式
+    if (needRequery && requeriedRecords && Object.keys(requeriedRecords).length > 0) {
       try {
-        console.log('检测到Google JSON响应，尝试转换为标准DNS消息格式');
+        console.log('使用重新查询的结果构建标准DNS消息');
+        
         // 创建一个新的DNS响应消息
         const responseMessage = buildDNSResponseFromRecords(domainName, requeriedRecords);
         
@@ -1692,31 +1696,95 @@ export async function onRequest(context) {
             'X-DNS-Upstream': result.server,
             'X-DNS-Response-Time': `${result.time}ms`,
             'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
-            'X-DNS-Debug': 'Converted Google JSON to standard DNS message',
+            'X-DNS-Debug': 'Using standard DNS message from requeried records',
             'Content-Type': 'application/dns-message'
           })
         });
-      } catch (conversionError) {
-        console.error('转换Google JSON响应失败:', conversionError);
-        // 如果转换失败，回退到原始响应
+      } catch (buildError) {
+        console.error('构建DNS响应消息失败:', buildError);
+        // 如果构建失败，尝试其他方式
       }
     }
     
-    // 标准响应处理，保持原始格式
-    return new Response(result.response.body, {
-      status: result.response.status,
-      statusText: result.response.statusText,
-      headers: new Headers({
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST',
-        'Cache-Control': 'public, max-age=60',
-        'X-DNS-Upstream': result.server,
-        'X-DNS-Response-Time': `${result.time}ms`,
-        'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
-        'X-DNS-Debug': 'Standard DNS response',
-        'Content-Type': contentType
-      })
-    });
+    // 2. 如果是Cloudflare，保持原始响应
+    if (result.server === "https://cloudflare-dns.com/dns-query") {
+      console.log('使用Cloudflare原始响应');
+      const contentType = result.response.headers.get('Content-Type') || 'application/dns-message';
+      
+      return new Response(result.response.body, {
+        status: result.response.status,
+        statusText: result.response.statusText,
+        headers: new Headers({
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST',
+          'Cache-Control': 'public, max-age=60',
+          'X-DNS-Upstream': result.server,
+          'X-DNS-Response-Time': `${result.time}ms`,
+          'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
+          'X-DNS-Debug': 'Using Cloudflare original response',
+          'Content-Type': contentType
+        })
+      });
+    }
+    
+    // 3. 最后尝试使用自己构建的DNS消息（即使没有重新查询成功）
+    // 这是为了确保非Cloudflare服务器也能返回有效响应
+    try {
+      // 尝试使用简洁记录构建DNS响应
+      console.log('尝试为非Cloudflare服务器构建DNS响应');
+      
+      // 解析原始响应（如果还没解析）
+      let records = requeriedRecords;
+      if (!records && dnsResponseBody) {
+        try {
+          records = extractAllRecordsFromDNSResponse(dnsResponseBody);
+        } catch (e) {
+          console.error('无法解析原始DNS响应:', e);
+          records = { A: [], AAAA: [] }; // 空记录集
+        }
+      }
+      
+      // 确保至少有一个空记录
+      if (!records || Object.keys(records).length === 0) {
+        records = { A: [], AAAA: [] };
+      }
+      
+      // 构建响应消息
+      const fallbackMessage = buildDNSResponseFromRecords(domainName, records);
+      
+      return new Response(fallbackMessage, {
+        status: 200,
+        headers: new Headers({
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST',
+          'Cache-Control': 'public, max-age=60',
+          'X-DNS-Upstream': result.server,
+          'X-DNS-Response-Time': `${result.time}ms`,
+          'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
+          'X-DNS-Debug': 'Using fallback DNS message format',
+          'Content-Type': 'application/dns-message'
+        })
+      });
+    } catch (fallbackError) {
+      console.error('构建备用DNS响应失败:', fallbackError);
+      
+      // 4. 如果所有尝试都失败，使用原始响应
+      const contentType = result.response.headers.get('Content-Type') || 'application/dns-message';
+      return new Response(result.response.body, {
+        status: result.response.status,
+        statusText: result.response.statusText,
+        headers: new Headers({
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST',
+          'Cache-Control': 'public, max-age=60',
+          'X-DNS-Upstream': result.server,
+          'X-DNS-Response-Time': `${result.time}ms`,
+          'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
+          'X-DNS-Debug': 'Using original response as last resort',
+          'Content-Type': contentType
+        })
+      });
+    }
   } catch (error) {
     console.error('处理DNS解析请求时出错:', error);
     

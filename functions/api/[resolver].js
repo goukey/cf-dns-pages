@@ -285,7 +285,11 @@ async function queryDNSServer(server, queryParams, request) {
     // 如果没有指定类型，使用特殊的ANY类型(255)查询所有记录类型
     // 注意：很多DNS服务器不完全支持ANY查询，依据RFC8482
     // 部分服务器会拒绝ANY查询并返回NOTIMP，此时我们会自动查询常见记录类型
+    // Google使用JSON格式响应，可能需要特殊处理
     const type = queryParams.get('type') || 'ANY';
+    
+    // 调试信息
+    console.log(`查询服务器 ${server} 记录类型: ${type}`);
     
     if (name) {
       // 构建基本的DNS查询消息 - 保留原始类型，包括ANY
@@ -341,23 +345,31 @@ async function queryDNSServer(server, queryParams, request) {
     if ((type || '').toUpperCase() === 'ANY') {
       // 尝试提前检测RFC8482响应
       const contentType = response.headers.get('Content-Type');
-      if (contentType && contentType.includes('application/dns-message')) {
+      if (contentType) {
         // 获取响应克隆，这样不会消耗原始响应
         const responseClone = response.clone();
         try {
-          const buffer = await responseClone.arrayBuffer();
-          const view = new DataView(buffer);
-          
-          // 检查回答数量和RCODE
-          const ancount = view.getUint16(6); // 回答计数
-          const rcode = view.getUint16(2) & 0x000F; // 错误码
-          
-          // 如果回答为0或返回NXDOMAIN (rcode=3)
-          if (ancount === 0 || rcode === 3 || rcode === 4) {
-            console.log(`服务器 ${server} 对ANY查询返回了无结果或错误(rcode=${rcode})`);
+          // 检查内容类型是否为DNS消息
+          if (contentType.includes('application/dns-message')) {
+            const buffer = await responseClone.arrayBuffer();
+            const view = new DataView(buffer);
+            
+            // 检查回答数量和RCODE
+            const ancount = view.getUint16(6); // 回答计数
+            const rcode = view.getUint16(2) & 0x000F; // 错误码
+            
+            // 如果回答为0或返回NXDOMAIN (rcode=3)或NOTIMP (rcode=4)
+            if (ancount === 0 || rcode === 3 || rcode === 4) {
+              console.log(`服务器 ${server} 对ANY查询返回了无结果或错误(rcode=${rcode})`);
+            }
+          } 
+          // 检查内容类型是否为JSON (Google和某些服务器使用)
+          else if (contentType.includes('application/json')) {
+            // 记录为特殊情况，可能需要特殊处理
+            console.log(`服务器 ${server} 返回JSON格式响应，可能需要特殊处理`);
           }
         } catch (e) {
-          console.error('预检RFC8482响应失败:', e);
+          console.error('预检DNS响应失败:', e);
         }
       }
     }
@@ -1631,20 +1643,63 @@ export async function onRequest(context) {
     }
     
     // 返回最快的有效响应（原始模式）
-    return new Response(result.response.body, {
-      status: result.response.status,
-      statusText: result.response.statusText,
-      headers: new Headers({
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST',
-        'Cache-Control': 'public, max-age=60',
-        'X-DNS-Upstream': result.server,
-        'X-DNS-Response-Time': `${result.time}ms`,
-        'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
-        'X-DNS-Debug': 'If you see this, your request was successfully processed',
-        'Content-Type': result.response.headers.get('Content-Type') || 'application/dns-message'
-      })
-    });
+    try {
+      // 确保内容类型正确设置
+      const contentType = result.response.headers.get('Content-Type') || 'application/dns-message';
+      
+      // 尝试返回响应
+      return new Response(result.response.body, {
+        status: result.response.status,
+        statusText: result.response.statusText,
+        headers: new Headers({
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST',
+          'Cache-Control': 'public, max-age=60',
+          'X-DNS-Upstream': result.server,
+          'X-DNS-Response-Time': `${result.time}ms`,
+          'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
+          'X-DNS-Debug': 'If you see this, your request was successfully processed',
+          'Content-Type': contentType
+        })
+      });
+    } catch (responseError) {
+      // 记录错误并尝试退回到简洁模式
+      console.error('在原始模式返回响应时出错:', responseError);
+      
+      // 分析响应并返回简洁模式格式
+      const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
+      
+      // 构建简洁响应
+      const simplifiedOutput = {
+        domain: domainName,
+        records: recordTypes,
+        server: result.server,
+        response_time_ms: result.time
+      };
+      
+      // 清理OTHER类型的记录
+      if (simplifiedOutput.records && simplifiedOutput.records.OTHER) {
+        simplifiedOutput.records.OTHER = simplifiedOutput.records.OTHER.map(record => ({
+          name: record.name,
+          recordType: record.recordType,
+          rdLength: record.rdLength,
+          ttl: record.ttl
+        }));
+      }
+      
+      // 返回JSON格式的简洁响应
+      return new Response(JSON.stringify(simplifiedOutput, null, 2), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=60',
+          'X-DNS-Upstream': result.server,
+          'X-DNS-Response-Time': `${result.time}ms`,
+          'X-DNS-Debug': 'Fallback to simplified response due to error'
+        }
+      });
+    }
   } catch (error) {
     console.error('处理DNS解析请求时出错:', error);
     

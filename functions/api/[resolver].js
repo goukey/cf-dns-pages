@@ -383,6 +383,7 @@ async function queryDNSServer(server, queryParams, request) {
       serverSupportsEcs: serverSupportsEcsFlag
     };
   } catch (error) {
+    console.error(`查询DNS服务器 ${server} 失败:`, error.message);
     return { 
       error: error.message, 
       server, 
@@ -628,6 +629,11 @@ function extractAllRecordsFromDNSResponse(buffer) {
           return { name: '[解析错误:过多的压缩跳转]', offset: currentOffset };
         }
         
+        // 检查缓冲区边界
+        if (currentOffset >= buffer.byteLength) {
+          return { name: '[解析错误:访问超出缓冲区]', offset: startOffset };
+        }
+        
         const len = view.getUint8(currentOffset);
         if (len === 0) {
           // 域名结束
@@ -642,8 +648,19 @@ function extractAllRecordsFromDNSResponse(buffer) {
             jumping = true;
           }
           
+          // 检查缓冲区边界
+          if (currentOffset + 1 >= buffer.byteLength) {
+            return { name: '[解析错误:访问超出缓冲区]', offset: startOffset };
+          }
+          
           // 计算跳转位置
           const jumpOffset = ((len & 0x3f) << 8) | view.getUint8(currentOffset + 1);
+          
+          // 检查跳转目标有效性
+          if (jumpOffset >= buffer.byteLength) {
+            return { name: '[解析错误:跳转目标无效]', offset: startOffset };
+          }
+          
           currentOffset = jumpOffset;
           jumpCount++;
           continue;
@@ -651,9 +668,21 @@ function extractAllRecordsFromDNSResponse(buffer) {
         
         // 读取标签
         currentOffset += 1;
+        
+        // 检查缓冲区边界
+        if (currentOffset + len > buffer.byteLength) {
+          return { name: '[解析错误:标签超出缓冲区]', offset: startOffset };
+        }
+        
         let label = '';
         for (let i = 0; i < len; i++) {
-          label += String.fromCharCode(view.getUint8(currentOffset + i));
+          // 只使用可打印字符
+          const charCode = view.getUint8(currentOffset + i);
+          if (charCode >= 32 && charCode < 127) {
+            label += String.fromCharCode(charCode);
+          } else {
+            label += '.'; // 用点替换不可打印字符
+          }
         }
         result += (result ? '.' : '') + label;
         currentOffset += len;
@@ -665,143 +694,368 @@ function extractAllRecordsFromDNSResponse(buffer) {
       };
     };
     
-    for (let i = 0; i < header.ancount; i++) {
-      // 读取域名
-      const domainResult = readDomainName(offset);
-      const domainName = domainResult.name;
-      offset = domainResult.offset;
-      
-      // 读取记录类型
-      const type = view.getUint16(offset);
-      offset += 2;
-      
-      // 读取类
-      const recordClass = view.getUint16(offset);
-      offset += 2;
-      
-      // 读取TTL
-      const ttl = view.getUint32(offset);
-      offset += 4;
-      
-      // 读取数据长度
-      const rdlength = view.getUint16(offset);
-      offset += 2;
-      
-      // 根据记录类型解析数据
-      switch (type) {
-        case 1: // A记录
-          if (rdlength === 4) {
-            const ip = `${view.getUint8(offset)}.${view.getUint8(offset+1)}.${view.getUint8(offset+2)}.${view.getUint8(offset+3)}`;
-            records.A.push({ name: domainName, value: ip, ttl });
-          }
-          break;
+    // 尝试解析所有回答记录
+    try {
+      for (let i = 0; i < header.ancount; i++) {
+        // 安全检查 - 确保偏移量在缓冲区内
+        if (offset + 10 >= buffer.byteLength) {
+          break; // 退出循环避免访问超出范围的内存
+        }
+        
+        // 读取域名
+        const domainResult = readDomainName(offset);
+        const domainName = domainResult.name;
+        offset = domainResult.offset;
+        
+        // 读取记录类型
+        const type = view.getUint16(offset);
+        offset += 2;
+        
+        // 读取类
+        const recordClass = view.getUint16(offset);
+        offset += 2;
+        
+        // 读取TTL
+        const ttl = view.getUint32(offset);
+        offset += 4;
+        
+        // 读取数据长度
+        const rdlength = view.getUint16(offset);
+        offset += 2;
+        
+        // 安全检查 - 确保rdlength在合理范围内
+        if (rdlength > 1000 || offset + rdlength > buffer.byteLength) {
+          // 数据长度不合理或会超出缓冲区
+          records.OTHER.push({
+            name: domainName,
+            recordType: type,
+            rdLength: rdlength,
+            value: '数据长度异常或超出缓冲区',
+            ttl
+          });
           
-        case 28: // AAAA记录
-          if (rdlength === 16) {
-            let ip = '';
-            for (let j = 0; j < 8; j++) {
-              const hexPart = view.getUint16(offset + j * 2).toString(16);
-              ip += (j > 0 ? ':' : '') + hexPart;
+          // 尝试安全跳过这个记录
+          if (offset + rdlength <= buffer.byteLength) {
+            offset += rdlength;
+          } else {
+            break; // 退出循环，避免继续解析可能损坏的数据
+          }
+          continue;
+        }
+        
+        // 根据记录类型解析数据
+        switch (type) {
+          case 1: // A记录
+            if (rdlength === 4) {
+              const ip = `${view.getUint8(offset)}.${view.getUint8(offset+1)}.${view.getUint8(offset+2)}.${view.getUint8(offset+3)}`;
+              records.A.push({ name: domainName, value: ip, ttl });
             }
-            records.AAAA.push({ name: domainName, value: ip, ttl });
-          }
-          break;
-          
-        case 5: // CNAME记录
-          {
-            const cnameResult = readDomainName(offset);
-            records.CNAME.push({ name: domainName, value: cnameResult.name, ttl });
-          }
-          break;
-          
-        case 15: // MX记录
-          {
-            const preference = view.getUint16(offset);
-            const exchangeResult = readDomainName(offset + 2);
-            records.MX.push({ 
-              name: domainName, 
-              value: { preference, exchange: exchangeResult.name }, 
-              ttl 
-            });
-          }
-          break;
-          
-        case 16: // TXT记录
-          {
-            let txtOffset = offset;
-            let txtValue = '';
-            const txtLength = view.getUint8(txtOffset);
-            txtOffset++;
-            for (let j = 0; j < txtLength; j++) {
-              txtValue += String.fromCharCode(view.getUint8(txtOffset + j));
-            }
-            records.TXT.push({ name: domainName, value: txtValue, ttl });
-          }
-          break;
-          
-        case 2: // NS记录
-          {
-            const nsResult = readDomainName(offset);
-            records.NS.push({ name: domainName, value: nsResult.name, ttl });
-          }
-          break;
-          
-        case 12: // PTR记录
-          {
-            const ptrResult = readDomainName(offset);
-            records.PTR.push({ name: domainName, value: ptrResult.name, ttl });
-          }
-          break;
-          
-        case 6: // SOA记录
-          {
-            // 读取SOA记录的更多字段：mname, rname, serial, refresh, retry, expire, minimum
-            const mname = readDomainName(offset);
-            const rname = readDomainName(mname.offset);
-            const soaOffset = rname.offset;
-            const serial = view.getUint32(soaOffset);
-            const refresh = view.getUint32(soaOffset + 4);
-            const retry = view.getUint32(soaOffset + 8);
-            const expire = view.getUint32(soaOffset + 12);
-            const minimum = view.getUint32(soaOffset + 16);
+            break;
             
-            records.SOA.push({
-              name: domainName,
-              value: {
-                mname: mname.name,
-                rname: rname.name,
-                serial,
-                refresh,
-                retry,
-                expire,
-                minimum
-              },
-              ttl
-            });
-          }
-          break;
-          
-        default:
-          // 处理未明确解析的记录类型，避免直接输出二进制数据
-          try {
-            // 对于未识别的记录类型，仅保存元数据信息
-            // 避免直接处理二进制数据，可能会导致错误的JSON字符串
+          case 28: // AAAA记录
+            if (rdlength === 16) {
+              let ip = '';
+              for (let j = 0; j < 8; j++) {
+                const hexPart = view.getUint16(offset + j * 2).toString(16);
+                ip += (j > 0 ? ':' : '') + hexPart;
+              }
+              records.AAAA.push({ name: domainName, value: ip, ttl });
+            }
+            break;
+            
+          case 5: // CNAME记录
+            {
+              const cnameResult = readDomainName(offset);
+              records.CNAME.push({ name: domainName, value: cnameResult.name, ttl });
+            }
+            break;
+            
+          case 15: // MX记录
+            {
+              const preference = view.getUint16(offset);
+              const exchangeResult = readDomainName(offset + 2);
+              records.MX.push({ 
+                name: domainName, 
+                value: { preference, exchange: exchangeResult.name }, 
+                ttl 
+              });
+            }
+            break;
+            
+          case 16: // TXT记录
+            {
+              let txtOffset = offset;
+              let txtValue = '';
+              
+              // 安全检查
+              if (txtOffset < buffer.byteLength) {
+                const txtLength = view.getUint8(txtOffset);
+                txtOffset++;
+                
+                // 确保不会超出缓冲区
+                if (txtOffset + txtLength <= offset + rdlength && txtOffset + txtLength <= buffer.byteLength) {
+                  for (let j = 0; j < txtLength; j++) {
+                    const charCode = view.getUint8(txtOffset + j);
+                    // 只接受可打印字符
+                    if (charCode >= 32 && charCode < 127) {
+                      txtValue += String.fromCharCode(charCode);
+                    } else {
+                      txtValue += '.'; // 用点替换不可打印字符
+                    }
+                  }
+                }
+              }
+              
+              records.TXT.push({ name: domainName, value: txtValue, ttl });
+            }
+            break;
+            
+          case 2: // NS记录
+            {
+              const nsResult = readDomainName(offset);
+              records.NS.push({ name: domainName, value: nsResult.name, ttl });
+            }
+            break;
+            
+          case 12: // PTR记录
+            {
+              const ptrResult = readDomainName(offset);
+              records.PTR.push({ name: domainName, value: ptrResult.name, ttl });
+            }
+            break;
+            
+          case 6: // SOA记录
+            {
+              const mnameDomain = readDomainName(offset);
+              let soaOffset = mnameDomain.offset;
+              const rnameDomain = readDomainName(soaOffset);
+              soaOffset = rnameDomain.offset;
+              
+              // 安全检查 - 确保有足够的数据来读取SOA的5个32位值
+              if (soaOffset + 20 <= offset + rdlength && soaOffset + 20 <= buffer.byteLength) {
+                const serial = view.getUint32(soaOffset);
+                const refresh = view.getUint32(soaOffset + 4);
+                const retry = view.getUint32(soaOffset + 8);
+                const expire = view.getUint32(soaOffset + 12);
+                const minimum = view.getUint32(soaOffset + 16);
+                
+                records.SOA.push({
+                  name: domainName,
+                  value: {
+                    mname: mnameDomain.name,
+                    rname: rnameDomain.name,
+                    serial,
+                    refresh,
+                    retry,
+                    expire,
+                    minimum
+                  },
+                  ttl
+                });
+              } else {
+                // 数据不完整，作为OTHER类型记录处理
+                records.OTHER.push({
+                  name: domainName,
+                  recordType: 'SOA(incomplete)',
+                  rdLength: rdlength,
+                  value: {
+                    mname: mnameDomain.name,
+                    rname: rnameDomain.name
+                  },
+                  ttl
+                });
+              }
+            }
+            break;
+            
+          case 257: // CAA记录
+            {
+              if (rdlength >= 2) {
+                const flags = view.getUint8(offset);
+                let tagLength = view.getUint8(offset + 1);
+                
+                // 安全检查
+                if (offset + 2 + tagLength < offset + rdlength && offset + 2 + tagLength < buffer.byteLength) {
+                  let tag = '';
+                  for (let j = 0; j < tagLength; j++) {
+                    tag += String.fromCharCode(view.getUint8(offset + 2 + j));
+                  }
+                  
+                  let valueLength = rdlength - 2 - tagLength;
+                  let value = '';
+                  
+                  // 安全检查
+                  if (offset + 2 + tagLength + valueLength <= buffer.byteLength) {
+                    for (let j = 0; j < valueLength; j++) {
+                      const charCode = view.getUint8(offset + 2 + tagLength + j);
+                      // 只接受可打印字符
+                      if (charCode >= 32 && charCode < 127) {
+                        value += String.fromCharCode(charCode);
+                      } else {
+                        value += '.'; // 用点替换不可打印字符
+                      }
+                    }
+                  }
+                  
+                  records.CAA.push({
+                    name: domainName,
+                    value: { flags, tag, value },
+                    ttl
+                  });
+                } else {
+                  // 数据不完整，作为OTHER类型记录处理
+                  records.OTHER.push({
+                    name: domainName,
+                    recordType: 'CAA(incomplete)',
+                    rdLength: rdlength,
+                    ttl
+                  });
+                }
+              }
+            }
+            break;
+            
+          case 33: // SRV记录
+            {
+              // 安全检查
+              if (offset + 6 < buffer.byteLength) {
+                const priority = view.getUint16(offset);
+                const weight = view.getUint16(offset + 2);
+                const port = view.getUint16(offset + 4);
+                const targetResult = readDomainName(offset + 6);
+                
+                records.SRV.push({
+                  name: domainName,
+                  value: {
+                    priority,
+                    weight,
+                    port,
+                    target: targetResult.name
+                  },
+                  ttl
+                });
+              } else {
+                // 数据不完整，作为OTHER类型记录处理
+                records.OTHER.push({
+                  name: domainName,
+                  recordType: 'SRV(incomplete)',
+                  rdLength: rdlength,
+                  ttl
+                });
+              }
+            }
+            break;
+            
+          default:
+            // 处理未知类型的记录 - 安全地存储记录类型和长度
+            let recordTypeName = 'TYPE' + type;
+            
+            // 常见的DNS记录类型映射
+            const typeMap = {
+              13: 'HINFO',   // 主机信息
+              17: 'RP',      // 负责人
+              18: 'AFSDB',   // AFS数据库
+              19: 'X25',     // X.25 PSDN地址
+              20: 'ISDN',    // ISDN地址
+              24: 'SIG',     // 签名
+              25: 'KEY',     // 密钥
+              29: 'LOC',     // 位置信息
+              43: 'DS',      // 委托签名者
+              44: 'SSHFP',   // SSH指纹
+              45: 'IPSECKEY',// IPSEC密钥
+              46: 'RRSIG',   // DNSSEC签名
+              47: 'NSEC',    // 下一个安全记录
+              48: 'DNSKEY',  // DNS密钥
+              50: 'NSEC3',   // NSEC记录版本3
+              51: 'NSEC3PARAM', // NSEC3参数
+              256: 'URI',    // 统一资源标识符
+              65281: 'SPF'   // SPF记录(弃用)
+            };
+            
+            if (typeMap[type]) {
+              recordTypeName = typeMap[type];
+            }
+            
+            // 尝试读取记录内容的安全方法
+            let value = '二进制数据';
+            try {
+              // 如果是HINFO记录，尝试解析为文本
+              if (type === 13) { // HINFO
+                let hinfo = { cpu: '', os: '' };
+                
+                // 读取CPU字符串
+                if (offset < buffer.byteLength) {
+                  const cpuLength = view.getUint8(offset);
+                  if (offset + 1 + cpuLength <= offset + rdlength && offset + 1 + cpuLength <= buffer.byteLength) {
+                    for (let j = 0; j < cpuLength; j++) {
+                      const charCode = view.getUint8(offset + 1 + j);
+                      if (charCode >= 32 && charCode < 127) {
+                        hinfo.cpu += String.fromCharCode(charCode);
+                      }
+                    }
+                    // 读取OS字符串
+                    const osOffset = offset + 1 + cpuLength;
+                    if (osOffset < buffer.byteLength) {
+                      const osLength = view.getUint8(osOffset);
+                      if (osOffset + 1 + osLength <= offset + rdlength && osOffset + 1 + osLength <= buffer.byteLength) {
+                        for (let j = 0; j < osLength; j++) {
+                          const charCode = view.getUint8(osOffset + 1 + j);
+                          if (charCode >= 32 && charCode < 127) {
+                            hinfo.os += String.fromCharCode(charCode);
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                value = hinfo;
+              }
+            } catch (e) {
+              console.error('解析特殊记录类型时出错:', e);
+              value = '解析错误';
+            }
+            
             records.OTHER.push({
               name: domainName,
-              recordType: type,
+              recordType: recordTypeName,
               rdLength: rdlength,
+              value: value,
               ttl
             });
-          } catch (err) {
-            console.error('解析OTHER类型记录失败:', err);
-          }
+        }
+        
+        // 移动到下一条记录
+        offset += rdlength;
       }
-      
-      // 跳过数据部分
-      offset += rdlength;
+    } catch (error) {
+      console.error('解析DNS记录时出错:', error);
+      // 仍然返回已解析的记录，不完全放弃
+      if (Object.values(records).flat().length === 0) {
+        // 如果没有解析到任何记录，返回错误
+        return {
+          ERROR: [{
+            name: 'PARSE_ERROR',
+            value: '解析DNS响应记录时出错: ' + error.message,
+            ttl: 0
+          }]
+        };
+      }
     }
     
-    // 清理空数组
+    // 检查是否有任何记录类型，如果没有，返回NOTE
+    const hasAnyRecords = Object.entries(records).some(([type, recs]) => 
+      type !== 'NOTE' && type !== 'ERROR' && recs.length > 0
+    );
+    
+    if (!hasAnyRecords) {
+      records.NOTE = [{
+        name: 'NO_RECORDS',
+        value: '解析成功，但没有找到有效记录',
+        ttl: 0
+      }];
+    }
+    
+    // 移除空的记录类型数组
     Object.keys(records).forEach(key => {
       if (records[key].length === 0) {
         delete records[key];
@@ -811,7 +1065,13 @@ function extractAllRecordsFromDNSResponse(buffer) {
     return records;
   } catch (error) {
     console.error('解析DNS响应时出错:', error);
-    return {};
+    return {
+      ERROR: [{
+        name: 'PARSE_ERROR',
+        value: '解析DNS响应时出错: ' + error.message,
+        ttl: 0
+      }]
+    };
   }
 }
 
@@ -1445,7 +1705,14 @@ export async function onRequest(context) {
     const outputFormat = url.searchParams.get(FORMAT_PARAM) || 'default';
     
     // 获取响应体，用于检查和处理RFC8482和空响应情况
-    const dnsResponseBody = await result.response.arrayBuffer();
+    let dnsResponseBody;
+    try {
+      const clonedResponse = result.response.clone();
+      dnsResponseBody = await clonedResponse.arrayBuffer();
+    } catch (bodyError) {
+      console.error('获取DNS响应体失败:', bodyError);
+      dnsResponseBody = new ArrayBuffer(0);
+    }
     
     // 检查是否需要处理ANY查询的特殊情况
     const isAnyQuery = (queryParams.get('type') || 'ANY').toUpperCase() === 'ANY';
@@ -1456,108 +1723,107 @@ export async function onRequest(context) {
     const isGoogleJsonResponse = result.response.headers.get('Content-Type')?.includes('application/json') && 
                                result.server.includes('dns.google');
     
-    // ANY查询特殊处理 - 检查是否需要对各记录类型单独查询
-    // 对于任何非Cloudflare服务器，始终重新查询，避免原始DNS响应处理错误
-    if (result.server !== "https://cloudflare-dns.com/dns-query") {
-      needRequery = true;
-    }
+    // 服务器处理逻辑优化 - 根据服务器类型选择最佳处理方式
+    const isCloudflare = result.server === "https://cloudflare-dns.com/dns-query";
+    const isGoogle = result.server.includes('dns.google');
+    const isAliDNS = result.server.includes('dns.alidns.com');
+    const isDNSPod = result.server.includes('doh.pub');
     
-    // 处理ANY查询或特殊格式响应
-    if (isAnyQuery || isGoogleJsonResponse) {
+    // 确定是否需要重新查询
+    // 对于Cloudflare，只在需要时重新查询；对于其他服务器，总是对ANY查询进行重新查询
+    if ((isAnyQuery && !isCloudflare) || isGoogleJsonResponse) {
+      needRequery = true;
+      console.log(`非Cloudflare服务器(${result.server})的ANY查询或特殊格式，将重新查询各记录类型`);
+    } else if (isAnyQuery && isCloudflare) {
+      // 对于Cloudflare，尝试检查其ANY响应是否有效
       try {
-        console.log(`处理ANY查询或特殊格式响应 (服务器: ${result.server})`);
-        
-        // 如果是Cloudflare，尝试检查其响应
-        if (result.server === "https://cloudflare-dns.com/dns-query") {
-          try {
-            // 尝试解析DNS响应
-            if (dnsResponseBody && dnsResponseBody.byteLength > 0) {
-              const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
-              const metRFC8482 = isRFC8482Response(recordTypes);
-              const emptyResponse = !recordTypes || Object.keys(recordTypes).length === 0 || 
-                (Object.keys(recordTypes).length === 1 && recordTypes.NOTE);
-                
-              // 检查RCODE
-              let rcode = 0;
-              if (dnsResponseBody.byteLength >= 4) {
-                rcode = new DataView(dnsResponseBody).getUint16(2) & 0x000F;
-                const isNXDomain = rcode === 3 || rcode === 4;
-                
-                // 只有在特定条件下才重新查询
-                if (emptyResponse || metRFC8482 || isNXDomain) {
-                  console.log(`Cloudflare ANY查询返回特殊响应 (rcode=${rcode})，尝试查询多种记录类型`);
-                  needRequery = true;
-                }
-              }
-            }
-          } catch (parseError) {
-            console.error('解析Cloudflare DNS响应时出错:', parseError);
-            needRequery = true;
-          }
-        } else {
-          // 非Cloudflare服务器，打印调试信息
-          console.log(`非Cloudflare服务器(${result.server})，将自动查询各类型记录`);
+        if (dnsResponseBody && dnsResponseBody.byteLength > 0) {
+          const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
           
-          // 要查询的常见DNS记录类型
-          const recordTypesToQuery = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA'];
-          const combinedRecords = {};
-          
-          // 为每种类型创建新的查询
-          for (const recType of recordTypesToQuery) {
-            const typeQueryParams = new URLSearchParams(queryParams);
-            typeQueryParams.set('type', recType);
+          // 检查是否是RFC8482响应或空响应
+          const metRFC8482 = isRFC8482Response(recordTypes);
+          const emptyResponse = !recordTypes || Object.keys(recordTypes).length === 0 || 
+            (Object.keys(recordTypes).length === 1 && recordTypes.NOTE);
             
-            // 尝试查询特定类型记录
-            const typeResult = await queryWithRetry(result.server, typeQueryParams, request);
+          // 检查RCODE
+          let rcode = 0;
+          if (dnsResponseBody.byteLength >= 4) {
+            rcode = new DataView(dnsResponseBody).getUint16(2) & 0x000F;
+            const isNXDomain = rcode === 3 || rcode === 4;
             
-            if (!typeResult.error && typeResult.response) {
-              const typeResponseBody = await typeResult.response.arrayBuffer();
-              const typeRecords = extractAllRecordsFromDNSResponse(typeResponseBody);
-              
-              // 合并结果
-              for (const [type, records] of Object.entries(typeRecords)) {
-                // 跳过NOTE类型记录的合并，避免产生重复的NO_RECORDS记录
-                if (type === 'NOTE' && records.some(r => r.name === 'NO_RECORDS')) {
-                  continue;
-                }
-                
-                // 跳过NOTE类型的重复记录
-                if (type === 'NOTE' && (combinedRecords[type] || []).some(r => r.name === 'NO_RECORDS')) {
-                  if (!records.some(r => r.name === 'NO_RECORDS')) {
-                    if (!combinedRecords[type]) {
-                      combinedRecords[type] = records;
-                    } else {
-                      combinedRecords[type] = [...combinedRecords[type], ...records];
-                    }
-                  }
-                } else if (!combinedRecords[type]) {
-                  combinedRecords[type] = records;
-                } else {
-                  combinedRecords[type] = [...combinedRecords[type], ...records];
-                }
-              }
-            }
-          }
-          
-          // 保存结果以供后续处理
-          if (Object.keys(combinedRecords).length > 0) {
-            requeriedRecords = combinedRecords;
-            // 如果检测到RFC8482响应，添加说明
-            if (metRFC8482 || emptyResponse) {
-              // 移除可能的RFC8482 PTR记录
-              delete requeriedRecords.PTR;
-              
-              // 添加提示信息
-              requeriedRecords.NOTE = [{ 
-                name: domainName, 
-                value: "上游DNS服务器不支持ANY查询(遵循RFC8482)，已自动查询各类型记录", 
-                ttl: 60 
-              }];
+            // 只有在特定条件下才重新查询
+            if (emptyResponse || metRFC8482 || isNXDomain) {
+              console.log(`Cloudflare ANY查询返回特殊响应 (rcode=${rcode})，尝试查询多种记录类型`);
+              needRequery = true;
             }
           }
         }
+      } catch (parseError) {
+        console.error('解析Cloudflare DNS响应时出错:', parseError);
+        needRequery = true;
+      }
+    }
+    
+    // 处理重新查询
+    if (needRequery) {
+      try {
+        console.log(`服务器(${result.server})需要重新查询各类型记录`);
+        
+        // 要查询的常见DNS记录类型
+        const recordTypesToQuery = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA'];
+        const combinedRecords = {};
+        
+        // 为每种类型创建新的查询
+        for (const recType of recordTypesToQuery) {
+          const typeQueryParams = new URLSearchParams(queryParams);
+          typeQueryParams.set('type', recType);
+          
+          // 尝试查询特定类型记录
+          try {
+            const typeResult = await queryWithRetry(result.server, typeQueryParams, request);
+            
+            if (!typeResult.error && typeResult.response) {
+              try {
+                const typeResponseBody = await typeResult.response.arrayBuffer();
+                const typeRecords = extractAllRecordsFromDNSResponse(typeResponseBody);
+                
+                // 合并结果
+                for (const [type, records] of Object.entries(typeRecords)) {
+                  // 跳过NOTE类型记录的合并，避免产生重复的NO_RECORDS记录
+                  if (type === 'NOTE' && records.some(r => r.name === 'NO_RECORDS')) {
+                    continue;
+                  }
+                  
+                  // 跳过NOTE类型的重复记录
+                  if (type === 'NOTE' && (combinedRecords[type] || []).some(r => r.name === 'NO_RECORDS')) {
+                    if (!records.some(r => r.name === 'NO_RECORDS')) {
+                      if (!combinedRecords[type]) {
+                        combinedRecords[type] = records;
+                      } else {
+                        combinedRecords[type] = [...combinedRecords[type], ...records];
+                      }
+                    }
+                  } else if (!combinedRecords[type]) {
+                    combinedRecords[type] = records;
+                  } else {
+                    combinedRecords[type] = [...combinedRecords[type], ...records];
+                  }
+                }
+              } catch (parseError) {
+                console.error(`解析${recType}记录响应时出错:`, parseError);
+              }
+            }
+          } catch (queryError) {
+            console.error(`查询${recType}记录时出错:`, queryError);
+          }
+        }
+        
+        // 保存结果以供后续处理
+        if (Object.keys(combinedRecords).length > 0) {
+          requeriedRecords = combinedRecords;
+        }
       } catch (error) {
-        console.error('处理ANY查询特殊情况时出错:', error);
+        console.error('重新查询各类型记录时出错:', error);
       }
     }
     
@@ -1567,8 +1833,30 @@ export async function onRequest(context) {
         let recordTypes = requeriedRecords;
         
         // 如果没有重新查询的结果，使用原始响应
-        if (!recordTypes) {
+        if (!recordTypes && dnsResponseBody && dnsResponseBody.byteLength > 0) {
           recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
+        }
+        
+        // 确保recordTypes存在
+        recordTypes = recordTypes || {};
+        
+        // 清理OTHER类型的记录，确保它们可以被安全序列化
+        if (recordTypes.OTHER && recordTypes.OTHER.length > 0) {
+          recordTypes.OTHER = recordTypes.OTHER.map(record => {
+            // 深拷贝以避免修改原始对象
+            const safeRecord = { ...record };
+            
+            // 对值进行特殊处理，确保它是可序列化的
+            if (typeof safeRecord.value === 'object' && safeRecord.value !== null) {
+              // 对象类型值，如HINFO记录中的{ cpu, os }
+              safeRecord.value = JSON.parse(JSON.stringify(safeRecord.value));
+            } else if (typeof safeRecord.value !== 'string' && typeof safeRecord.value !== 'number') {
+              // 如果值不是字符串、数字或对象，转换为字符串
+              safeRecord.value = String(safeRecord.value || '');
+            }
+            
+            return safeRecord;
+          });
         }
         
         // 构建响应输出
@@ -1706,14 +1994,29 @@ export async function onRequest(context) {
       }
     }
     
-    // 2. 如果是Cloudflare，保持原始响应
-    if (result.server === "https://cloudflare-dns.com/dns-query") {
-      console.log('使用Cloudflare原始响应');
+    // 2. 尝试使用原始响应 - 适用于所有服务器，包括Cloudflare
+    try {
+      console.log(`尝试使用 ${result.server} 的原始响应`);
       const contentType = result.response.headers.get('Content-Type') || 'application/dns-message';
       
-      return new Response(result.response.body, {
-        status: result.response.status,
-        statusText: result.response.statusText,
+      // 始终创建响应体的新副本，避免流已消耗错误
+      let responseBody;
+      if (dnsResponseBody && dnsResponseBody.byteLength > 0) {
+        responseBody = dnsResponseBody;  // 使用之前获取的响应体
+      } else {
+        // 尝试再次获取响应体
+        try {
+          const freshClone = result.response.clone();
+          responseBody = await freshClone.arrayBuffer();
+        } catch (e) {
+          console.error('无法获取响应体:', e);
+          // 创建一个空的DNS响应
+          responseBody = new Uint8Array(12);  // 12字节的空DNS头
+        }
+      }
+      
+      return new Response(responseBody, {
+        status: 200, // 强制使用200状态码，避免出现500错误
         headers: new Headers({
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST',
@@ -1721,70 +2024,28 @@ export async function onRequest(context) {
           'X-DNS-Upstream': result.server,
           'X-DNS-Response-Time': `${result.time}ms`,
           'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
-          'X-DNS-Debug': 'Using Cloudflare original response',
+          'X-DNS-Debug': 'Using original response with safe body handling',
           'Content-Type': contentType
         })
       });
-    }
-    
-    // 3. 最后尝试使用自己构建的DNS消息（即使没有重新查询成功）
-    // 这是为了确保非Cloudflare服务器也能返回有效响应
-    try {
-      // 尝试使用简洁记录构建DNS响应
-      console.log('尝试为非Cloudflare服务器构建DNS响应');
+    } catch (originalError) {
+      console.error(`使用原始响应失败:`, originalError);
       
-      // 解析原始响应（如果还没解析）
-      let records = requeriedRecords;
-      if (!records && dnsResponseBody) {
-        try {
-          records = extractAllRecordsFromDNSResponse(dnsResponseBody);
-        } catch (e) {
-          console.error('无法解析原始DNS响应:', e);
-          records = { A: [], AAAA: [] }; // 空记录集
-        }
-      }
-      
-      // 确保至少有一个空记录
-      if (!records || Object.keys(records).length === 0) {
-        records = { A: [], AAAA: [] };
-      }
-      
-      // 构建响应消息
-      const fallbackMessage = buildDNSResponseFromRecords(domainName, records);
-      
-      return new Response(fallbackMessage, {
+      // 如果原始响应处理失败，返回一个最小化的安全响应
+      return new Response(new Uint8Array(12), {  // 12字节的空DNS头
         status: 200,
         headers: new Headers({
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST',
-          'Cache-Control': 'public, max-age=60',
+          'Cache-Control': 'no-cache',
           'X-DNS-Upstream': result.server,
           'X-DNS-Response-Time': `${result.time}ms`,
-          'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
-          'X-DNS-Debug': 'Using fallback DNS message format',
+          'X-DNS-Debug': 'Fallback empty response - all processing methods failed',
           'Content-Type': 'application/dns-message'
         })
       });
-    } catch (fallbackError) {
-      console.error('构建备用DNS响应失败:', fallbackError);
-      
-      // 4. 如果所有尝试都失败，使用原始响应
-      const contentType = result.response.headers.get('Content-Type') || 'application/dns-message';
-      return new Response(result.response.body, {
-        status: result.response.status,
-        statusText: result.response.statusText,
-        headers: new Headers({
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST',
-          'Cache-Control': 'public, max-age=60',
-          'X-DNS-Upstream': result.server,
-          'X-DNS-Response-Time': `${result.time}ms`,
-          'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
-          'X-DNS-Debug': 'Using original response as last resort',
-          'Content-Type': contentType
-        })
-      });
     }
+    
   } catch (error) {
     console.error('处理DNS解析请求时出错:', error);
     
@@ -1810,4 +2071,4 @@ export async function onRequest(context) {
       }
     });
   }
-} 
+}

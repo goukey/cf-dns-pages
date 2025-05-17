@@ -181,19 +181,31 @@ function buildDNSMessage(domainName, recordType) {
   
   // 确定记录类型
   let qtype = 255; // 默认为ANY记录，查询所有类型
-  switch (recordType.toUpperCase()) {
-    case 'A': qtype = 1; break;
-    case 'AAAA': qtype = 28; break;
-    case 'CNAME': qtype = 5; break;
-    case 'MX': qtype = 15; break;
-    case 'TXT': qtype = 16; break;
-    case 'NS': qtype = 2; break;
-    case 'SOA': qtype = 6; break;
-    case 'SRV': qtype = 33; break;
-    case 'PTR': qtype = 12; break;
-    case 'CAA': qtype = 257; break;
-    case 'ANY': qtype = 255; break; // ANY查询所有记录类型
-    default: qtype = parseInt(recordType) || 1; // 如果是数字直接使用
+  
+  // 处理记录类型
+  // 注意：多数DNS服务器已经实现RFC8482，不再完全支持ANY查询
+  // 如果遇到ANY查询失败，系统会自动退回到单独查询多种记录类型
+  if (typeof recordType === 'string') {
+    switch (recordType.toUpperCase()) {
+      case 'A': qtype = 1; break;
+      case 'AAAA': qtype = 28; break;
+      case 'CNAME': qtype = 5; break;
+      case 'MX': qtype = 15; break;
+      case 'TXT': qtype = 16; break;
+      case 'NS': qtype = 2; break;
+      case 'SOA': qtype = 6; break;
+      case 'SRV': qtype = 33; break;
+      case 'PTR': qtype = 12; break;
+      case 'CAA': qtype = 257; break;
+      case 'ANY': qtype = 255; break; // ANY查询所有记录类型
+      default: 
+        // 尝试解析为数字
+        const typeNum = parseInt(recordType);
+        qtype = !isNaN(typeNum) ? typeNum : 255; // 如果无效，默认使用ANY
+    }
+  } else {
+    // 非字符串类型，可能是数字
+    qtype = parseInt(recordType) || 255;
   }
   
   // 添加类型和类
@@ -271,7 +283,7 @@ async function queryDNSServer(server, queryParams, request) {
     // 检查是否有DNS查询基本参数
     const name = queryParams.get('name');
     // 如果没有指定类型，使用特殊的ANY类型(255)查询所有记录类型
-    // 注意：部分DNS服务器可能不支持ANY查询
+    // 注意：很多DNS服务器不完全支持ANY查询，依据RFC8482
     const type = queryParams.get('type') || 'ANY';
     
     if (name) {
@@ -322,6 +334,31 @@ async function queryDNSServer(server, queryParams, request) {
     // 验证响应是否有效
     if (!response.ok) {
       throw new Error(`DNS服务器响应错误: ${response.status} ${response.statusText}`);
+    }
+    
+    // 检查是否是ANY类型查询
+    if ((type || '').toUpperCase() === 'ANY') {
+      // 尝试提前检测RFC8482响应
+      const contentType = response.headers.get('Content-Type');
+      if (contentType && contentType.includes('application/dns-message')) {
+        // 获取响应克隆，这样不会消耗原始响应
+        const responseClone = response.clone();
+        try {
+          const buffer = await responseClone.arrayBuffer();
+          const view = new DataView(buffer);
+          
+          // 检查回答数量和RCODE
+          const ancount = view.getUint16(6); // 回答计数
+          const rcode = view.getUint16(2) & 0x000F; // 错误码
+          
+          // 如果回答为0或返回NXDOMAIN (rcode=3)
+          if (ancount === 0 || rcode === 3 || rcode === 4) {
+            console.log(`服务器 ${server} 对ANY查询返回了无结果或错误(rcode=${rcode})`);
+          }
+        } catch (e) {
+          console.error('预检RFC8482响应失败:', e);
+        }
+      }
     }
     
     return { 
@@ -451,18 +488,75 @@ function extractAllRecordsFromDNSResponse(buffer) {
     const view = new DataView(buffer);
     
     // 解析DNS头部
-    const qdcount = view.getUint16(4); // 问题计数
-    const ancount = view.getUint16(6); // 回答计数
+    const header = {
+      id: view.getUint16(0),
+      flags: view.getUint16(2),
+      qdcount: view.getUint16(4), // 问题计数
+      ancount: view.getUint16(6), // 回答计数
+      nscount: view.getUint16(8), // 权威记录计数
+      arcount: view.getUint16(10) // 附加记录计数
+    };
     
-    if (ancount === 0) {
-      return {}; // 没有回答记录
+    // 提取RCODE (错误代码)
+    const rcode = header.flags & 0x000F;
+    
+    // 如果是NXDOMAIN (rcode=3)或其他错误，记录到结果中
+    if (rcode !== 0) {
+      const rcodeMessages = {
+        0: '没有错误',
+        1: '格式错误',
+        2: '服务器失败',
+        3: '域名不存在 (NXDOMAIN)',
+        4: '查询类型不支持',
+        5: '服务器拒绝处理',
+        6: 'YX域',
+        7: 'YX RR Set',
+        8: 'NX RR Set',
+        9: '您不是授权方',
+        10: '域名不在区域中',
+        11: '11 (保留)',
+        12: '12 (保留)',
+        13: '13 (保留)',
+        14: '14 (保留)',
+        15: '15 (保留)'
+      };
+      
+      const records = {
+        ERROR: [{
+          name: 'RCODE',
+          value: `${rcode} - ${rcodeMessages[rcode] || '未知错误'}`,
+          ttl: 0
+        }]
+      };
+      
+      // 如果是RCODE=4（查询类型不支持），这可能是RFC8482的暗示
+      if (rcode === 4) {
+        records.NOTE = [{
+          name: 'RFC8482',
+          value: '服务器返回RCODE=4，表明不支持查询类型，可能是对ANY查询的RFC8482响应',
+          ttl: 0
+        }];
+      }
+      
+      return records;
+    }
+    
+    // 如果没有回答记录但不是因为错误
+    if (header.ancount === 0 && rcode === 0) {
+      return {
+        NOTE: [{
+          name: 'NO_RECORDS',
+          value: '查询成功，但没有找到匹配记录',
+          ttl: 0
+        }]
+      };
     }
     
     // 跳过查询部分
     let offset = 12; // DNS头部长度为12字节
     
     // 跳过所有问题
-    for (let i = 0; i < qdcount; i++) {
+    for (let i = 0; i < header.qdcount; i++) {
       // 跳过域名
       while (true) {
         const len = view.getUint8(offset);
@@ -493,7 +587,8 @@ function extractAllRecordsFromDNSResponse(buffer) {
       SOA: [],
       SRV: [],
       PTR: [],
-      CAA: []
+      CAA: [],
+      OTHER: [] // 其他未明确处理的记录类型
     };
     
     const readDomainName = (startOffset) => {
@@ -547,7 +642,7 @@ function extractAllRecordsFromDNSResponse(buffer) {
       };
     };
     
-    for (let i = 0; i < ancount; i++) {
+    for (let i = 0; i < header.ancount; i++) {
       // 读取域名
       const domainResult = readDomainName(offset);
       const domainName = domainResult.name;
@@ -627,6 +722,50 @@ function extractAllRecordsFromDNSResponse(buffer) {
             records.NS.push({ name: domainName, value: nsResult.name, ttl });
           }
           break;
+          
+        case 12: // PTR记录
+          {
+            const ptrResult = readDomainName(offset);
+            records.PTR.push({ name: domainName, value: ptrResult.name, ttl });
+          }
+          break;
+          
+        case 6: // SOA记录
+          {
+            // 读取SOA记录的更多字段：mname, rname, serial, refresh, retry, expire, minimum
+            const mname = readDomainName(offset);
+            const rname = readDomainName(mname.offset);
+            const soaOffset = rname.offset;
+            const serial = view.getUint32(soaOffset);
+            const refresh = view.getUint32(soaOffset + 4);
+            const retry = view.getUint32(soaOffset + 8);
+            const expire = view.getUint32(soaOffset + 12);
+            const minimum = view.getUint32(soaOffset + 16);
+            
+            records.SOA.push({
+              name: domainName,
+              value: {
+                mname: mname.name,
+                rname: rname.name,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum
+              },
+              ttl
+            });
+          }
+          break;
+          
+        default:
+          // 处理未明确解析的记录类型
+          records.OTHER.push({
+            name: domainName,
+            recordType: type,
+            rdLength: rdlength,
+            ttl
+          });
       }
       
       // 跳过数据部分
@@ -645,6 +784,312 @@ function extractAllRecordsFromDNSResponse(buffer) {
     console.error('解析DNS响应时出错:', error);
     return {};
   }
+}
+
+// 检查是否是RFC8482响应（禁用ANY查询的响应）
+const isRFC8482Response = (records) => {
+  // 检查是否有PTR记录并且值包含RFC8482
+  if (records.PTR && records.PTR.length > 0) {
+    for (const ptr of records.PTR) {
+      const ptrValue = ptr.value;
+      if (typeof ptrValue === 'string' && 
+          (ptrValue.includes('RFC8482') || ptrValue.includes('RFC 8482'))) {
+        return true;
+      }
+    }
+  }
+  
+  // 检查返回的记录总数，可能表明是RFC8482响应
+  // ANY请求通常应该返回多个记录类型
+  const totalTypes = Object.keys(records).length;
+  if (totalTypes === 1 && records.hasOwnProperty('PTR')) {
+    return true;
+  }
+  
+  // 检查是否有TXT记录提到RFC8482
+  if (records.TXT && records.TXT.length > 0) {
+    for (const txt of records.TXT) {
+      const txtValue = txt.value;
+      if (typeof txtValue === 'string' && 
+          (txtValue.includes('RFC8482') || txtValue.includes('RFC 8482'))) {
+        return true;
+      }
+    }
+  }
+  
+  // 检查是否有一个CNAME记录指向rfc8482
+  if (records.CNAME && records.CNAME.length > 0) {
+    for (const cname of records.CNAME) {
+      const cnameValue = cname.value;
+      if (typeof cnameValue === 'string' && 
+          (cnameValue.includes('rfc8482') || cnameValue.includes('rfc-8482'))) {
+        return true;
+      }
+    }
+  }
+  
+  return false;
+};
+
+// 从记录集合构建完整的DNS响应消息
+function buildDNSResponseFromRecords(domainName, records) {
+  // DNS 响应ID（随机16位）
+  const id = Math.floor(Math.random() * 65536);
+  
+  // 第一个字节: 标准响应，递归可用
+  // 第二个字节: RD位和RA位设置为1（期望递归+递归可用）
+  const flags = 0x8180; // 二进制：10000001 10000000
+  
+  // 计算问题和回答数量
+  const qdcount = 1; // 一个问题（原始查询）
+  
+  // 计算所有记录的总数
+  let ancount = 0;
+  for (const type in records) {
+    if (type !== 'NOTE' && type !== 'ERROR') { // 排除非标准DNS记录类型
+      ancount += records[type].length;
+    }
+  }
+  
+  // 其他字段都是0
+  const nscount = 0;
+  const arcount = 0;
+  
+  // 构建查询问题部分
+  // 拆分域名为各段标签
+  const labels = domainName.split('.');
+  
+  // 计算域名编码后的长度
+  const domainBytes = labels.reduce((acc, label) => acc + label.length + 1, 0) + 1;
+  
+  // 分配足够的空间 - 估算需要的空间
+  // 头部(12字节) + 问题部分(域名+4字节) + 回答部分(每个记录约20-50字节)
+  const estimatedSize = 12 + domainBytes + 4 + (ancount * 50); 
+  const message = new Uint8Array(estimatedSize);
+  
+  // 填充头部
+  message[0] = id >> 8; // ID高字节
+  message[1] = id & 0xff; // ID低字节
+  message[2] = flags >> 8; // flags高字节
+  message[3] = flags & 0xff; // flags低字节
+  message[4] = qdcount >> 8; // QDCOUNT高字节
+  message[5] = qdcount & 0xff; // QDCOUNT低字节
+  message[6] = ancount >> 8; // ANCOUNT高字节
+  message[7] = ancount & 0xff; // ANCOUNT低字节
+  message[8] = nscount >> 8; // NSCOUNT高字节
+  message[9] = nscount & 0xff; // NSCOUNT低字节
+  message[10] = arcount >> 8; // ARCOUNT高字节
+  message[11] = arcount & 0xff; // ARCOUNT低字节
+  
+  // 填充查询域（问题部分）
+  let offset = 12;
+  for (const label of labels) {
+    message[offset++] = label.length; // 标签长度
+    // 填充标签字符
+    for (let i = 0; i < label.length; i++) {
+      message[offset++] = label.charCodeAt(i);
+    }
+  }
+  // 添加根标签
+  message[offset++] = 0;
+  
+  // 添加ANY查询类型(255)和IN类(1)
+  message[offset++] = 0; // QTYPE高字节
+  message[offset++] = 255; // QTYPE低字节 - ANY
+  message[offset++] = 0; // QCLASS高字节
+  message[offset++] = 1; // QCLASS低字节 - IN
+  
+  // 添加各类型的记录
+  const recordTypeMappings = {
+    'A': 1,
+    'NS': 2,
+    'CNAME': 5,
+    'SOA': 6,
+    'PTR': 12,
+    'MX': 15,
+    'TXT': 16,
+    'AAAA': 28,
+    'SRV': 33,
+    'CAA': 257
+  };
+  
+  // 添加A记录
+  if (records.A && records.A.length > 0) {
+    for (const record of records.A) {
+      // 添加域名引用（压缩指针）
+      message[offset++] = 0xc0; // 压缩指针标记
+      message[offset++] = 12; // 指向头部后的域名位置
+      
+      // 添加记录类型
+      message[offset++] = 0; // A记录类型高字节
+      message[offset++] = 1; // A记录类型低字节
+      
+      // 添加记录类
+      message[offset++] = 0; // IN类高字节
+      message[offset++] = 1; // IN类低字节
+      
+      // 添加TTL（生存时间）- 使用记录中的TTL或默认值
+      const ttl = record.ttl || 300;
+      message[offset++] = (ttl >> 24) & 0xff;
+      message[offset++] = (ttl >> 16) & 0xff;
+      message[offset++] = (ttl >> 8) & 0xff;
+      message[offset++] = ttl & 0xff;
+      
+      // 添加数据长度 - A记录总是4字节
+      message[offset++] = 0; // 长度高字节
+      message[offset++] = 4; // 长度低字节
+      
+      // 添加IP地址
+      const ipParts = record.value.split('.');
+      for (const part of ipParts) {
+        message[offset++] = parseInt(part);
+      }
+    }
+  }
+  
+  // 添加AAAA记录
+  if (records.AAAA && records.AAAA.length > 0) {
+    for (const record of records.AAAA) {
+      // 添加域名引用（压缩指针）
+      message[offset++] = 0xc0; // 压缩指针标记
+      message[offset++] = 12; // 指向头部后的域名位置
+      
+      // 添加记录类型
+      message[offset++] = 0; // AAAA记录类型高字节
+      message[offset++] = 28; // AAAA记录类型低字节
+      
+      // 添加记录类
+      message[offset++] = 0; // IN类高字节
+      message[offset++] = 1; // IN类低字节
+      
+      // 添加TTL（生存时间）
+      const ttl = record.ttl || 300;
+      message[offset++] = (ttl >> 24) & 0xff;
+      message[offset++] = (ttl >> 16) & 0xff;
+      message[offset++] = (ttl >> 8) & 0xff;
+      message[offset++] = ttl & 0xff;
+      
+      // 添加数据长度 - AAAA记录总是16字节
+      message[offset++] = 0; // 长度高字节
+      message[offset++] = 16; // 长度低字节
+      
+      // 添加IPv6地址
+      // 将IPv6地址分解为16位块
+      const ipv6 = record.value;
+      try {
+        // 确保IPv6地址是完整格式
+        const fullIpv6 = expandIPv6Address(ipv6);
+        const parts = fullIpv6.split(':');
+        
+        // IPv6地址应有8组16位值
+        if (parts.length === 8) {
+          for (const part of parts) {
+            const value = parseInt(part, 16) || 0;
+            message[offset++] = (value >> 8) & 0xff; // 高字节
+            message[offset++] = value & 0xff; // 低字节
+          }
+        } else {
+          // 如果格式不对，使用0填充
+          for (let i = 0; i < 8; i++) {
+            message[offset++] = 0;
+            message[offset++] = 0;
+          }
+        }
+      } catch (e) {
+        console.error('解析IPv6地址时出错:', e);
+        // 使用0填充16字节
+        for (let i = 0; i < 8; i++) {
+          message[offset++] = 0;
+          message[offset++] = 0;
+        }
+      }
+    }
+  }
+  
+  // 添加CNAME记录
+  if (records.CNAME && records.CNAME.length > 0) {
+    for (const record of records.CNAME) {
+      // 添加域名引用（压缩指针）
+      message[offset++] = 0xc0; // 压缩指针标记
+      message[offset++] = 12; // 指向头部后的域名位置
+      
+      // 添加记录类型
+      message[offset++] = 0; // CNAME记录类型高字节
+      message[offset++] = 5; // CNAME记录类型低字节
+      
+      // 添加记录类
+      message[offset++] = 0; // IN类高字节
+      message[offset++] = 1; // IN类低字节
+      
+      // 添加TTL（生存时间）
+      const ttl = record.ttl || 300;
+      message[offset++] = (ttl >> 24) & 0xff;
+      message[offset++] = (ttl >> 16) & 0xff;
+      message[offset++] = (ttl >> 8) & 0xff;
+      message[offset++] = ttl & 0xff;
+      
+      // 编码CNAME目标域名
+      const cnameParts = record.value.split('.');
+      const cnameLength = cnameParts.reduce((acc, part) => acc + part.length + 1, 1);
+      
+      // 添加数据长度
+      message[offset++] = (cnameLength >> 8) & 0xff;
+      message[offset++] = cnameLength & 0xff;
+      
+      // 添加域名各部分
+      for (const part of cnameParts) {
+        message[offset++] = part.length;
+        for (let i = 0; i < part.length; i++) {
+          message[offset++] = part.charCodeAt(i);
+        }
+      }
+      // 结束域名
+      message[offset++] = 0;
+    }
+  }
+  
+  // 添加TXT记录
+  if (records.TXT && records.TXT.length > 0) {
+    for (const record of records.TXT) {
+      // 添加域名引用（压缩指针）
+      message[offset++] = 0xc0; // 压缩指针标记
+      message[offset++] = 12; // 指向头部后的域名位置
+      
+      // 添加记录类型
+      message[offset++] = 0; // TXT记录类型高字节
+      message[offset++] = 16; // TXT记录类型低字节
+      
+      // 添加记录类
+      message[offset++] = 0; // IN类高字节
+      message[offset++] = 1; // IN类低字节
+      
+      // 添加TTL（生存时间）
+      const ttl = record.ttl || 300;
+      message[offset++] = (ttl >> 24) & 0xff;
+      message[offset++] = (ttl >> 16) & 0xff;
+      message[offset++] = (ttl >> 8) & 0xff;
+      message[offset++] = ttl & 0xff;
+      
+      // 文本内容 - TXT记录的特殊格式：长度前缀字符串
+      const txtValue = record.value || '';
+      const txtBytes = Math.min(255, txtValue.length);
+      
+      // 添加数据长度 (文本长度 + 1个字节的长度字段)
+      message[offset++] = 0;
+      message[offset++] = txtBytes + 1;
+      
+      // 添加文本长度字节
+      message[offset++] = txtBytes;
+      
+      // 添加文本字符
+      for (let i = 0; i < txtBytes; i++) {
+        message[offset++] = txtValue.charCodeAt(i);
+      }
+    }
+  }
+  
+  // 返回实际使用的部分
+  return message.slice(0, offset);
 }
 
 export async function onRequest(context) {
@@ -782,7 +1227,7 @@ export async function onRequest(context) {
       // 用户手动指定了ECS
       // 验证IPv4或IPv6格式
       const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$/;
-      const ipv6Regex = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))(\/\d{1,3})?$/;
+      const ipv6Regex = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
       
       if (ipv4Regex.test(ecsValue) || ipv6Regex.test(ecsValue)) {
         // 确保IPv4和IPv6都有适当的掩码长度
@@ -963,44 +1408,35 @@ export async function onRequest(context) {
     // 检查输出格式
     const outputFormat = url.searchParams.get(FORMAT_PARAM) || 'default';
     
-    if (outputFormat === 'simple') {
+    // 获取响应体，用于检查和处理RFC8482和空响应情况
+    const dnsResponseBody = await result.response.arrayBuffer();
+    
+    // 检查是否需要处理ANY查询的特殊情况
+    const isAnyQuery = (queryParams.get('type') || 'ANY').toUpperCase() === 'ANY';
+    let needRequery = false;
+    let requeriedRecords = null;
+    
+    // ANY查询特殊处理 - 检查是否需要对各记录类型单独查询
+    if (isAnyQuery) {
       try {
-        // 获取响应体
-        const dnsResponseBody = await result.response.arrayBuffer();
+        // 首先尝试解析DNS响应
+        const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
+        const metRFC8482 = isRFC8482Response(recordTypes);
+        const emptyResponse = Object.keys(recordTypes).length === 0 || 
+          (Object.keys(recordTypes).length === 1 && recordTypes.NOTE);
         
-        // 始终显示所有类型记录
-        let recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
+        // 检查RCODE
+        const rcode = new DataView(dnsResponseBody).getUint16(2) & 0x000F;
+        const isNXDomain = rcode === 3 || rcode === 4;
         
-        // RFC8482检测 - 判断是否收到了RFC8482响应（禁用ANY查询的响应）
-        const isRFC8482Response = (records) => {
-          // 检查是否有PTR记录并且值包含RFC8482
-          if (records.PTR && records.PTR.length === 1) {
-            const ptrValue = records.PTR[0].value;
-            return typeof ptrValue === 'string' && ptrValue.includes('RFC8482');
-          }
-          
-          // 检查返回的记录总数，可能表明是RFC8482响应
-          // ANY请求通常应该返回多个记录类型
-          const totalTypes = Object.keys(records).length;
-          if (totalTypes === 1 && records.hasOwnProperty('PTR')) {
-            return true;
-          }
-          
-          return false;
-        };
-        
-        // 如果是ANY类型查询且返回的记录为空或收到RFC8482响应，尝试查询多种常见记录类型
-        if ((queryParams.get('type') || 'ANY').toUpperCase() === 'ANY' && 
-            (Object.keys(recordTypes).length === 0 || isRFC8482Response(recordTypes))) {
-          
-          console.log("ANY类型查询返回空结果或RFC8482响应，尝试查询多种记录类型");
+        // 如果ANY查询无结果或被拒绝，尝试单独查询各类型记录
+        if (emptyResponse || metRFC8482 || isNXDomain) {
+          console.log(`ANY查询返回空结果或RFC8482响应或NXDOMAIN (rcode=${rcode})，尝试查询多种记录类型`);
+          needRequery = true;
           
           // 要查询的常见DNS记录类型
           const recordTypesToQuery = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA'];
-          let combinedRecords = {};
-          
-          // 检测是否遇到了RFC8482响应
-          const metRFC8482 = isRFC8482Response(recordTypes);
+          const combinedRecords = {};
           
           // 为每种类型创建新的查询
           for (const recType of recordTypesToQuery) {
@@ -1025,23 +1461,36 @@ export async function onRequest(context) {
             }
           }
           
-          // 如果合并后有结果，使用合并的结果
+          // 保存结果以供后续处理
           if (Object.keys(combinedRecords).length > 0) {
-            recordTypes = combinedRecords;
+            requeriedRecords = combinedRecords;
+            // 如果检测到RFC8482响应，添加说明
+            if (metRFC8482 || emptyResponse) {
+              // 移除可能的RFC8482 PTR记录
+              delete requeriedRecords.PTR;
+              
+              // 添加提示信息
+              requeriedRecords.NOTE = [{ 
+                name: domainName, 
+                value: "上游DNS服务器不支持ANY查询(遵循RFC8482)，已自动查询各类型记录", 
+                ttl: 60 
+              }];
+            }
           }
-          
-          // 如果检测到RFC8482响应，添加说明并移除PTR记录
-          if (metRFC8482) {
-            // 移除RFC8482的PTR记录
-            delete recordTypes.PTR;
-            
-            // 添加提示信息到响应
-            recordTypes.NOTE = [{ 
-              name: domainName, 
-              value: "上游DNS服务器不支持ANY查询(遵循RFC8482)，已自动查询各类型记录", 
-              ttl: 60 
-            }];
-          }
+        }
+      } catch (error) {
+        console.error('处理ANY查询特殊情况时出错:', error);
+      }
+    }
+    
+    if (outputFormat === 'simple') {
+      try {
+        // 使用已经获取的响应体或重新查询的结果
+        let recordTypes = requeriedRecords;
+        
+        // 如果没有重新查询的结果，使用原始响应
+        if (!recordTypes) {
+          recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
         }
         
         // 构建响应输出
@@ -1103,12 +1552,43 @@ export async function onRequest(context) {
           });
         }
       } catch (error) {
-        console.error('处理简单输出时出错:', error);
+        console.error('处理简洁输出时出错:', error);
         // 继续使用普通响应
+      }
+    } else if (needRequery && requeriedRecords) {
+      // 对于标准模式下的ANY查询，如果单独查询各类型记录成功，
+      // 需要构建一个类似RFC8482响应的DNS消息以兼容标准DNS客户端
+      try {
+        // 记录各记录类型数量的日志
+        console.log(`构建合成DNS响应:`, Object.keys(requeriedRecords).map(type => 
+          `${type}=${requeriedRecords[type]?.length || 0}`).join(', '));
+        
+        // 创建一个新的DNS响应消息
+        const responseMessage = buildDNSResponseFromRecords(domainName, requeriedRecords);
+        
+        console.log(`构建了 ${responseMessage.byteLength} 字节的DNS响应消息`);
+        
+        return new Response(responseMessage, {
+          status: 200,
+          headers: new Headers({
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST',
+            'Cache-Control': 'public, max-age=60',
+            'X-DNS-Upstream': result.server,
+            'X-DNS-Response-Time': `${result.time}ms`,
+            'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
+            'X-DNS-Debug': 'RFC8482 response rebuilt with all record types',
+            'X-DNS-Record-Types': Object.keys(requeriedRecords).join(','),
+            'Content-Type': 'application/dns-message'
+          })
+        });
+      } catch (error) {
+        console.error('构建DNS响应消息时出错:', error);
+        // 继续使用原始响应
       }
     }
     
-    // 返回最快的有效响应
+    // 返回最快的有效响应（原始模式）
     return new Response(result.response.body, {
       status: result.response.status,
       statusText: result.response.statusText,

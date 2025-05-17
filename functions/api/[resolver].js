@@ -284,6 +284,7 @@ async function queryDNSServer(server, queryParams, request) {
     const name = queryParams.get('name');
     // 如果没有指定类型，使用特殊的ANY类型(255)查询所有记录类型
     // 注意：很多DNS服务器不完全支持ANY查询，依据RFC8482
+    // 部分服务器会拒绝ANY查询并返回NOTIMP，此时我们会自动查询常见记录类型
     const type = queryParams.get('type') || 'ANY';
     
     if (name) {
@@ -559,6 +560,16 @@ function extractAllRecordsFromDNSResponse(buffer) {
     for (let i = 0; i < header.qdcount; i++) {
       // 跳过域名
       while (true) {
+        if (offset >= buffer.byteLength) {
+          return {
+            ERROR: [{
+              name: 'PARSE_ERROR',
+              value: '解析DNS响应时超出缓冲区范围',
+              ttl: 0
+            }]
+          };
+        }
+        
         const len = view.getUint8(offset);
         if (len === 0) {
           offset += 1;
@@ -759,13 +770,19 @@ function extractAllRecordsFromDNSResponse(buffer) {
           break;
           
         default:
-          // 处理未明确解析的记录类型
-          records.OTHER.push({
-            name: domainName,
-            recordType: type,
-            rdLength: rdlength,
-            ttl
-          });
+          // 处理未明确解析的记录类型，避免直接输出二进制数据
+          try {
+            // 对于未识别的记录类型，仅保存元数据信息
+            // 避免直接处理二进制数据，可能会导致错误的JSON字符串
+            records.OTHER.push({
+              name: domainName,
+              recordType: type,
+              rdLength: rdlength,
+              ttl
+            });
+          } catch (err) {
+            console.error('解析OTHER类型记录失败:', err);
+          }
       }
       
       // 跳过数据部分
@@ -1452,7 +1469,21 @@ export async function onRequest(context) {
               
               // 合并结果
               for (const [type, records] of Object.entries(typeRecords)) {
-                if (!combinedRecords[type]) {
+                // 跳过NOTE类型记录的合并，避免产生重复的NO_RECORDS记录
+                if (type === 'NOTE' && records.some(r => r.name === 'NO_RECORDS')) {
+                  continue;
+                }
+                
+                // 跳过NOTE类型的重复记录
+                if (type === 'NOTE' && (combinedRecords[type] || []).some(r => r.name === 'NO_RECORDS')) {
+                  if (!records.some(r => r.name === 'NO_RECORDS')) {
+                    if (!combinedRecords[type]) {
+                      combinedRecords[type] = records;
+                    } else {
+                      combinedRecords[type] = [...combinedRecords[type], ...records];
+                    }
+                  }
+                } else if (!combinedRecords[type]) {
                   combinedRecords[type] = records;
                 } else {
                   combinedRecords[type] = [...combinedRecords[type], ...records];
@@ -1539,6 +1570,17 @@ export async function onRequest(context) {
             }
           });
         } else {
+          // 在JSON序列化前清理记录，移除可能导致问题的二进制数据
+          // 清理OTHER类型的记录，确保只包含安全的字段
+          if (allTypesOutput.records && allTypesOutput.records.OTHER) {
+            allTypesOutput.records.OTHER = allTypesOutput.records.OTHER.map(record => ({
+              name: record.name,
+              recordType: record.recordType,
+              rdLength: record.rdLength,
+              ttl: record.ttl
+            }));
+          }
+          
           // 返回JSON输出
           return new Response(JSON.stringify(allTypesOutput, null, 2), {
             status: 200,

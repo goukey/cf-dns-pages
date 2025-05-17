@@ -817,9 +817,16 @@ function extractAllRecordsFromDNSResponse(buffer) {
 
 // 检查是否是RFC8482响应（禁用ANY查询的响应）
 const isRFC8482Response = (records) => {
+  // 确保records是有效对象
+  if (!records || typeof records !== 'object') {
+    return false;
+  }
+  
   // 检查是否有PTR记录并且值包含RFC8482
-  if (records.PTR && records.PTR.length > 0) {
+  if (records.PTR && Array.isArray(records.PTR) && records.PTR.length > 0) {
     for (const ptr of records.PTR) {
+      if (!ptr || typeof ptr !== 'object') continue;
+      
       const ptrValue = ptr.value;
       if (typeof ptrValue === 'string' && 
           (ptrValue.includes('RFC8482') || ptrValue.includes('RFC 8482'))) {
@@ -1445,18 +1452,37 @@ export async function onRequest(context) {
     let needRequery = false;
     let requeriedRecords = null;
     
+    // 检查是否为Google JSON格式的响应
+    const isGoogleJsonResponse = result.response.headers.get('Content-Type')?.includes('application/json') && 
+                               result.server.includes('dns.google');
+    
     // ANY查询特殊处理 - 检查是否需要对各记录类型单独查询
-    if (isAnyQuery) {
+    if (isAnyQuery || isGoogleJsonResponse) {
       try {
         // 首先尝试解析DNS响应
         const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
         const metRFC8482 = isRFC8482Response(recordTypes);
-        const emptyResponse = Object.keys(recordTypes).length === 0 || 
+        const emptyResponse = !recordTypes || Object.keys(recordTypes).length === 0 || 
           (Object.keys(recordTypes).length === 1 && recordTypes.NOTE);
         
-        // 检查RCODE
-        const rcode = new DataView(dnsResponseBody).getUint16(2) & 0x000F;
-        const isNXDomain = rcode === 3 || rcode === 4;
+        // 检查RCODE - 确保dnsResponseBody有效
+        let rcode = 0;
+        let isNXDomain = false;
+        
+        try {
+          if (dnsResponseBody && dnsResponseBody.byteLength >= 4) {
+            rcode = new DataView(dnsResponseBody).getUint16(2) & 0x000F;
+            isNXDomain = rcode === 3 || rcode === 4;
+          }
+        } catch (e) {
+          console.error('检查RCODE时出错:', e);
+        }
+        
+        // 对于Google JSON响应，总是需要重新查询
+        if (isGoogleJsonResponse) {
+          console.log(`检测到Google JSON响应，将自动查询各记录类型`);
+          needRequery = true;
+        }
         
         // 如果ANY查询无结果或被拒绝，尝试单独查询各类型记录
         if (emptyResponse || metRFC8482 || isNXDomain) {
@@ -1643,63 +1669,54 @@ export async function onRequest(context) {
     }
     
     // 返回最快的有效响应（原始模式）
-    try {
-      // 确保内容类型正确设置
-      const contentType = result.response.headers.get('Content-Type') || 'application/dns-message';
-      
-      // 尝试返回响应
-      return new Response(result.response.body, {
-        status: result.response.status,
-        statusText: result.response.statusText,
-        headers: new Headers({
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST',
-          'Cache-Control': 'public, max-age=60',
-          'X-DNS-Upstream': result.server,
-          'X-DNS-Response-Time': `${result.time}ms`,
-          'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
-          'X-DNS-Debug': 'If you see this, your request was successfully processed',
-          'Content-Type': contentType
-        })
-      });
-    } catch (responseError) {
-      // 记录错误并尝试退回到简洁模式
-      console.error('在原始模式返回响应时出错:', responseError);
-      
-      // 分析响应并返回简洁模式格式
-      const recordTypes = extractAllRecordsFromDNSResponse(dnsResponseBody);
-      
-      // 构建简洁响应
-      const simplifiedOutput = {
-        domain: domainName,
-        records: recordTypes,
-        server: result.server,
-        response_time_ms: result.time
-      };
-      
-      // 清理OTHER类型的记录
-      if (simplifiedOutput.records && simplifiedOutput.records.OTHER) {
-        simplifiedOutput.records.OTHER = simplifiedOutput.records.OTHER.map(record => ({
-          name: record.name,
-          recordType: record.recordType,
-          rdLength: record.rdLength,
-          ttl: record.ttl
-        }));
+    // 永远保持原始格式，以支持第三方DNS客户端如AdGuard Home等
+    // 保留原始响应的Content-Type和body
+    const contentType = result.response.headers.get('Content-Type') || 'application/dns-message';
+    
+    // 确认是否为Google的JSON响应格式，需要特殊处理
+    // (已在上方声明isGoogleJsonResponse变量)
+    
+    // 如果是Google的JSON响应，使用通用DNS消息格式包装
+    if (isGoogleJsonResponse && needRequery && requeriedRecords) {
+      try {
+        console.log('检测到Google JSON响应，尝试转换为标准DNS消息格式');
+        // 创建一个新的DNS响应消息
+        const responseMessage = buildDNSResponseFromRecords(domainName, requeriedRecords);
+        
+        return new Response(responseMessage, {
+          status: 200,
+          headers: new Headers({
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST',
+            'Cache-Control': 'public, max-age=60',
+            'X-DNS-Upstream': result.server,
+            'X-DNS-Response-Time': `${result.time}ms`,
+            'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
+            'X-DNS-Debug': 'Converted Google JSON to standard DNS message',
+            'Content-Type': 'application/dns-message'
+          })
+        });
+      } catch (conversionError) {
+        console.error('转换Google JSON响应失败:', conversionError);
+        // 如果转换失败，回退到原始响应
       }
-      
-      // 返回JSON格式的简洁响应
-      return new Response(JSON.stringify(simplifiedOutput, null, 2), {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=60',
-          'X-DNS-Upstream': result.server,
-          'X-DNS-Response-Time': `${result.time}ms`,
-          'X-DNS-Debug': 'Fallback to simplified response due to error'
-        }
-      });
     }
+    
+    // 标准响应处理，保持原始格式
+    return new Response(result.response.body, {
+      status: result.response.status,
+      statusText: result.response.statusText,
+      headers: new Headers({
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST',
+        'Cache-Control': 'public, max-age=60',
+        'X-DNS-Upstream': result.server,
+        'X-DNS-Response-Time': `${result.time}ms`,
+        'X-DNS-ECS-Status': result.hasEcs ? `Added (${result.ecsSource})` : 'Not added',
+        'X-DNS-Debug': 'Standard DNS response',
+        'Content-Type': contentType
+      })
+    });
   } catch (error) {
     console.error('处理DNS解析请求时出错:', error);
     
